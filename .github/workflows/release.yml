@@ -164,31 +164,18 @@ jobs:
           STAGING="$RUNNER_TEMP/pkg_staging"
           mkdir -p "$STAGING"
 
-          # Write component plist for app (prevent Finder relocation)
-          cat > "$RUNNER_TEMP/app-component.plist" << 'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <array><dict>
-            <key>BundleIsRelocatable</key><false/>
-            <key>BundleOverwriteAction</key><string>upgrade</string>
-          </dict></array>
-          </plist>
-          PLIST
-
           # App component package
           pkgbuild \
-            --root build/Release/MacAudio.app \
-            --install-location /Applications/MacAudio.app \
-            --component-plist "$RUNNER_TEMP/app-component.plist" \
+            --component build/Release/MacAudio.app \
+            --install-location /Applications \
             --version "$VERSION" \
             --identifier com.macaudio.app.pkg \
             "$STAGING/MacAudioApp.pkg"
 
           # Driver component package (with pre/post install scripts)
           pkgbuild \
-            --root build/Release/MacAudioDriver.driver \
-            --install-location "/Library/Audio/Plug-Ins/HAL/MacAudioDriver.driver" \
+            --component build/Release/MacAudioDriver.driver \
+            --install-location "/Library/Audio/Plug-Ins/HAL" \
             --scripts packaging/scripts \
             --version "$VERSION" \
             --identifier com.macaudio.driver.pkg \
