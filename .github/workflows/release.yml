@@ -117,8 +117,12 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
 
           # Debug: verify certs are found
-          echo "=== Signing identities in keychain ==="
-          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+          echo "=== All identities in temp keychain (including invalid) ==="
+          security find-identity -p codesigning "$KEYCHAIN_PATH" || true
+          echo "=== Valid identities across ALL keychains ==="
+          security find-identity -v -p codesigning || true
+          echo "=== Certificates in temp keychain ==="
+          security find-certificate -a -c "Developer" "$KEYCHAIN_PATH" | grep -E "^keychain|\"labl\"|\"subj\"" || true
           echo "=== Keychain search list ==="
           security list-keychains -d user
 
