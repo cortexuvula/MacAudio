@@ -1,0 +1,34 @@
+# Build output
+build/
+DerivedData/
+
+# Xcode user-specific files
+*.xcuserstate
+xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Xcode generated (regenerated via xcodegen)
+MacAudio.xcodeproj/
+
+# Claude Code local settings
+.claude/
+
+# macOS metadata
+.DS_Store
+*.swp
+*~
+
+# Shared memory diagnostic tools
+shm_check
+shm_check.c
+shm_stat
+shm_stat.c
+
+# Environment / secrets
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.secret
+credentials.*

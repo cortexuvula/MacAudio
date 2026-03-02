@@ -1,0 +1,77 @@
+name: MacAudio
+options:
+  bundleIdPrefix: com.macaudio
+  deploymentTarget:
+    macOS: "14.2"
+  xcodeVersion: "16.0"
+
+settings:
+  base:
+    MACOSX_DEPLOYMENT_TARGET: "14.2"
+
+targets:
+  MacAudio:
+    type: application
+    platform: macOS
+    sources:
+      - path: MacAudio
+        excludes:
+          - "**/*.entitlements"
+      - path: MacAudioDriver/SharedRingBuffer.h
+        buildPhase: headers
+      - path: MacAudioDriver/SharedRingBuffer.c
+        buildPhase: sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.macaudio.app
+        INFOPLIST_FILE: MacAudio/Info.plist
+        SWIFT_OBJC_BRIDGING_HEADER: MacAudio/MacAudioBridgingHeader.h
+        CODE_SIGN_ENTITLEMENTS: MacAudio/MacAudio.entitlements
+        CODE_SIGN_IDENTITY: "Developer ID Application"
+        DEVELOPMENT_TEAM: RB4QV9W52C
+        CODE_SIGN_STYLE: Manual
+        ENABLE_HARDENED_RUNTIME: true
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
+        GENERATE_INFOPLIST_FILE: false
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/MacAudioDriver"
+    dependencies:
+      - target: MacAudioDriver
+    postBuildScripts:
+      - name: "Copy Driver to Resources"
+        script: |
+          mkdir -p "${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
+          cp -R "${BUILT_PRODUCTS_DIR}/MacAudioDriver.driver" \
+            "${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/" 2>/dev/null || true
+        basedOnDependencyAnalysis: false
+  MacAudioDriver:
+    type: bundle
+    platform: macOS
+    sources:
+      - path: MacAudioDriver
+        excludes:
+          - "**/*.entitlements"
+          - "**/Info.plist"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.macaudio.driver
+        INFOPLIST_FILE: MacAudioDriver/Info.plist
+        WRAPPER_EXTENSION: driver
+        GENERATE_INFOPLIST_FILE: false
+        INSTALL_PATH: "$(LOCAL_LIBRARY_DIR)/Audio/Plug-Ins/HAL"
+        SKIP_INSTALL: true
+        CLANG_ENABLE_MODULES: true
+        CODE_SIGN_IDENTITY: "Developer ID Application"
+        DEVELOPMENT_TEAM: RB4QV9W52C
+        CODE_SIGN_STYLE: Manual
+        OTHER_LDFLAGS:
+          - "-framework CoreAudio"
+          - "-framework CoreFoundation"
+    info:
+      path: MacAudioDriver/Info.plist
+      properties:
+        CFPlugInFactories:
+          1D7C8EF9-F60D-4280-AE18-92321C5944DB: MacAudioDriver_Create
+        CFPlugInTypes:
+          443ABAB8-E7B3-491A-B985-BEB9187030DB:
+            - 1D7C8EF9-F60D-4280-AE18-92321C5944DB
