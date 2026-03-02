@@ -229,12 +229,31 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
 
-          xcrun notarytool submit \
+          # Submit and capture output to extract submission ID
+          SUBMIT_OUT=$(xcrun notarytool submit \
             "$RUNNER_TEMP/MacAudio-$VERSION.dmg" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_ID_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
-            --wait
+            --output-format json \
+            --wait) || true
+
+          echo "$SUBMIT_OUT"
+          SUBMISSION_ID=$(echo "$SUBMIT_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || true)
+          STATUS=$(echo "$SUBMIT_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])" 2>/dev/null || true)
+
+          # If notarization failed, fetch and display the log
+          if [ "$STATUS" != "Accepted" ]; then
+            echo "::error::Notarization failed with status: $STATUS"
+            if [ -n "$SUBMISSION_ID" ]; then
+              echo "=== Notarization Log ==="
+              xcrun notarytool log "$SUBMISSION_ID" \
+                --apple-id "$APPLE_ID" \
+                --password "$APPLE_ID_PASSWORD" \
+                --team-id "$APPLE_TEAM_ID" || true
+            fi
+            exit 1
+          fi
 
           xcrun stapler staple "$RUNNER_TEMP/MacAudio-$VERSION.dmg"
 
@@ -246,12 +265,29 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
 
-          xcrun notarytool submit \
+          SUBMIT_OUT=$(xcrun notarytool submit \
             "$RUNNER_TEMP/MacAudio-$VERSION.pkg" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_ID_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
-            --wait
+            --output-format json \
+            --wait) || true
+
+          echo "$SUBMIT_OUT"
+          SUBMISSION_ID=$(echo "$SUBMIT_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || true)
+          STATUS=$(echo "$SUBMIT_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])" 2>/dev/null || true)
+
+          if [ "$STATUS" != "Accepted" ]; then
+            echo "::error::Notarization failed with status: $STATUS"
+            if [ -n "$SUBMISSION_ID" ]; then
+              echo "=== Notarization Log ==="
+              xcrun notarytool log "$SUBMISSION_ID" \
+                --apple-id "$APPLE_ID" \
+                --password "$APPLE_ID_PASSWORD" \
+                --team-id "$APPLE_TEAM_ID" || true
+            fi
+            exit 1
+          fi
 
           xcrun stapler staple "$RUNNER_TEMP/MacAudio-$VERSION.pkg"
 
