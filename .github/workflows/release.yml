@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 env:
   XCODE_VERSION: '16.0'
   APP_NAME: MacAudio
