@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>MacAudio</title>
+    <organization>com.macaudio</organization>
+    <options
+        customize="never"
+        require-scripts="false"
+        rootVolumeOnly="true"
+        hostArchitectures="arm64,x86_64"
+    />
+
+    <!-- Require macOS 14.2+ (Core Audio Taps API) -->
+    <volume-check>
+        <allowed-os-versions>
+            <os-version min="14.2" />
+        </allowed-os-versions>
+    </volume-check>
+
+    <welcome file="welcome.html" mime-type="text/html" />
+    <conclusion file="conclusion.html" mime-type="text/html" />
+
+    <choices-outline>
+        <line choice="default">
+            <line choice="com.macaudio.app.pkg" />
+            <line choice="com.macaudio.driver.pkg" />
+        </line>
+    </choices-outline>
+
+    <choice id="default" />
+
+    <choice
+        id="com.macaudio.app.pkg"
+        visible="false"
+        enabled="true"
+        selected="true"
+        title="MacAudio App"
+        description="The MacAudio menu bar application.">
+        <pkg-ref id="com.macaudio.app.pkg" />
+    </choice>
+
+    <choice
+        id="com.macaudio.driver.pkg"
+        visible="false"
+        enabled="true"
+        selected="true"
+        title="MacAudio Driver"
+        description="The MacAudio virtual audio device driver.">
+        <pkg-ref id="com.macaudio.driver.pkg" />
+    </choice>
+
+    <pkg-ref id="com.macaudio.app.pkg">MacAudioApp.pkg</pkg-ref>
+    <pkg-ref id="com.macaudio.driver.pkg">MacAudioDriver.pkg</pkg-ref>
+</installer-gui-script>
