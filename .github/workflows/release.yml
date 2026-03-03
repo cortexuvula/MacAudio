@@ -179,53 +179,37 @@ jobs:
           STAGING="$RUNNER_TEMP/pkg_staging"
           mkdir -p "$STAGING"
 
-          # Component plists to disable bundle relocation — without this,
-          # macOS relocates the install to wherever it finds an existing copy
-          # (e.g. a developer's build/Debug/ directory).
-          cat > "$STAGING/app-component.plist" << 'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <array>
-            <dict>
-              <key>BundleIsRelocatable</key>
-              <false/>
-              <key>BundleOverwriteAction</key>
-              <string>upgrade</string>
-            </dict>
-          </array>
-          </plist>
-          PLIST
+          # Use --root mode with component plists to disable bundle relocation.
+          # Without BundleIsRelocatable=false, macOS redirects the install to
+          # wherever it finds an existing copy (e.g. a developer's build/Debug/).
 
-          cat > "$STAGING/driver-component.plist" << 'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <array>
-            <dict>
-              <key>BundleIsRelocatable</key>
-              <false/>
-              <key>BundleOverwriteAction</key>
-              <string>upgrade</string>
-            </dict>
-          </array>
-          </plist>
-          PLIST
+          # Stage app into a root directory
+          APP_ROOT="$STAGING/app_root"
+          mkdir -p "$APP_ROOT/Applications"
+          cp -R build/Release/MacAudio.app "$APP_ROOT/Applications/"
 
-          # App component package (with pre-install to stop running app)
+          # Analyze to get default plist, then patch relocation off
+          pkgbuild --analyze --root "$APP_ROOT" "$STAGING/app-component.plist"
+          /usr/libexec/PlistBuddy -c "Set :0:BundleIsRelocatable false" "$STAGING/app-component.plist"
+
           pkgbuild \
-            --component build/Release/MacAudio.app \
-            --install-location /Applications \
+            --root "$APP_ROOT" \
             --component-plist "$STAGING/app-component.plist" \
             --scripts packaging/scripts/app \
             --version "$VERSION" \
             --identifier com.macaudio.app.pkg \
             "$STAGING/MacAudioApp.pkg"
 
-          # Driver component package (with pre/post install scripts)
+          # Stage driver into a root directory
+          DRIVER_ROOT="$STAGING/driver_root"
+          mkdir -p "$DRIVER_ROOT/Library/Audio/Plug-Ins/HAL"
+          cp -R build/Release/MacAudioDriver.driver "$DRIVER_ROOT/Library/Audio/Plug-Ins/HAL/"
+
+          pkgbuild --analyze --root "$DRIVER_ROOT" "$STAGING/driver-component.plist"
+          /usr/libexec/PlistBuddy -c "Set :0:BundleIsRelocatable false" "$STAGING/driver-component.plist"
+
           pkgbuild \
-            --component build/Release/MacAudioDriver.driver \
-            --install-location "/Library/Audio/Plug-Ins/HAL" \
+            --root "$DRIVER_ROOT" \
             --component-plist "$STAGING/driver-component.plist" \
             --scripts packaging/scripts/driver \
             --version "$VERSION" \
