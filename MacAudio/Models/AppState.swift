@@ -51,7 +51,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    nonisolated deinit {
+    deinit {
         if let listener = deviceChangeListener {
             var address = AudioObjectPropertyAddress(
                 mSelector: kAudioHardwarePropertyDevices,
