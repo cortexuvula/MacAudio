@@ -42,7 +42,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             appState.$lastError.map { _ in () }.eraseToAnyPublisher(),
             appState.$micPermissionGranted.map { _ in () }.eraseToAnyPublisher(),
             appState.$screenCapturePermissionGranted.map { _ in () }.eraseToAnyPublisher(),
-            appState.$captureStatus.map { _ in () }.eraseToAnyPublisher()
+            appState.$captureStatus.map { _ in () }.eraseToAnyPublisher(),
+            appState.$isSetupComplete.map { _ in () }.eraseToAnyPublisher(),
+            appState.$launchAtLogin.map { _ in () }.eraseToAnyPublisher(),
+            appState.$autoStartCapture.map { _ in () }.eraseToAnyPublisher()
         )
         .receive(on: RunLoop.main)
         .sink { [weak self] _ in
@@ -50,18 +53,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.updateStatusIcon()
         }
         .store(in: &cancellables)
+
+        appState.$isSetupComplete
+            .first(where: { $0 == true })
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.appState.attemptAutoStart()
+            }
+            .store(in: &cancellables)
     }
 
     private func updateStatusIcon() {
         guard let button = statusItem?.button else { return }
         let symbolName: String
-        switch appState.captureStatus {
-        case .stopped:
-            symbolName = "waveform.circle"
-        case .both:
-            symbolName = "waveform.circle.fill"
-        case .micOnly:
-            symbolName = "mic.circle.fill"
+        if appState.lastError != nil && !appState.isActive {
+            symbolName = "exclamationmark.circle"
+        } else {
+            switch appState.captureStatus {
+            case .stopped:
+                symbolName = "waveform.circle"
+            case .both:
+                symbolName = "waveform.circle.fill"
+            case .micOnly:
+                symbolName = "mic.circle.fill"
+            }
         }
         button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "MacAudio")
     }
@@ -150,6 +165,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         micItem.submenu = micMenu
         menu.addItem(micItem)
 
+        // Settings submenu
+        let settingsMenu = NSMenu()
+        let loginItem = NSMenuItem(
+            title: "Launch at Login",
+            action: #selector(toggleLaunchAtLogin),
+            keyEquivalent: ""
+        )
+        loginItem.target = self
+        loginItem.state = appState.launchAtLogin ? .on : .off
+        settingsMenu.addItem(loginItem)
+
+        let autoStartItem = NSMenuItem(
+            title: "Auto-Start Capturing",
+            action: #selector(toggleAutoStartCapture),
+            keyEquivalent: ""
+        )
+        autoStartItem.target = self
+        autoStartItem.state = appState.autoStartCapture ? .on : .off
+        autoStartItem.isEnabled = appState.launchAtLogin
+        settingsMenu.addItem(autoStartItem)
+
+        let settingsItem = NSMenuItem(title: "Settings", action: nil, keyEquivalent: "")
+        settingsItem.submenu = settingsMenu
+        menu.addItem(settingsItem)
+
         menu.addItem(NSMenuItem.separator())
 
         // Error display
@@ -231,6 +271,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func requestScreenPermission() {
         appState.requestScreenPermission()
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        appState.toggleLaunchAtLogin()
+    }
+
+    @objc private func toggleAutoStartCapture() {
+        appState.toggleAutoStartCapture()
     }
 
     @objc private func micSliderChanged(_ sender: NSSlider) {

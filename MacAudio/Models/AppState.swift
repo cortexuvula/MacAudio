@@ -2,6 +2,7 @@ import SwiftUI
 import CoreAudio
 import Combine
 import AVFoundation
+import ServiceManagement
 import os
 
 enum CaptureStatus {
@@ -30,6 +31,9 @@ final class AppState: ObservableObject {
     @Published var lastError: String?
     @Published var micPermissionGranted = false
     @Published var screenCapturePermissionGranted = false
+    @Published var isSetupComplete = false
+    @Published var launchAtLogin = false
+    @Published var autoStartCapture = false
     private var audioMixer: AudioMixer?
     private var deviceChangeListener: AudioObjectPropertyListenerBlock?
     private let logger = Logger(subsystem: "com.macaudio.app", category: "state")
@@ -37,6 +41,7 @@ final class AppState: ObservableObject {
     private static let micVolumeKey = "micVolume"
     private static let systemVolumeKey = "systemVolume"
     private static let selectedMicDeviceIDKey = "selectedMicDeviceID"
+    private static let autoStartCaptureKey = "autoStartCapture"
 
     init() {
         loadPreferences()
@@ -59,6 +64,8 @@ final class AppState: ObservableObject {
                     self?.refreshDevicesAsync()
                 }
                 self.logger.info("AppState setup complete, \(devices.count) mic devices found, driver=\(installed), mic=\(micAuth), screen=\(screenAuth)")
+                self.launchAtLogin = SMAppService.mainApp.status == .enabled
+                self.isSetupComplete = true
             }
         }
     }
@@ -123,6 +130,46 @@ final class AppState: ObservableObject {
                 }
             }
         }
+    }
+
+    func toggleLaunchAtLogin() {
+        let service = SMAppService.mainApp
+        do {
+            if service.status == .enabled {
+                try service.unregister()
+                launchAtLogin = false
+                autoStartCapture = false
+                savePreferences()
+            } else {
+                try service.register()
+                launchAtLogin = true
+            }
+        } catch {
+            launchAtLogin = service.status == .enabled
+            lastError = "Failed to update login item: \(error.localizedDescription)"
+            logger.error("SMAppService error: \(error.localizedDescription)")
+        }
+    }
+
+    func toggleAutoStartCapture() {
+        autoStartCapture.toggle()
+        savePreferences()
+    }
+
+    func attemptAutoStart() {
+        guard autoStartCapture else { return }
+        guard driverInstalled else {
+            lastError = "Auto-start failed: audio driver not installed"
+            logger.warning("Auto-start skipped: driver not installed")
+            return
+        }
+        guard micPermissionGranted else {
+            lastError = "Auto-start failed: microphone permission not granted"
+            logger.warning("Auto-start skipped: mic permission not granted")
+            return
+        }
+        logger.info("Auto-starting audio capture")
+        startAudio()
     }
 
     func requestMicPermission() {
@@ -203,6 +250,7 @@ final class AppState: ObservableObject {
         UserDefaults.standard.set(micVolume, forKey: Self.micVolumeKey)
         UserDefaults.standard.set(systemVolume, forKey: Self.systemVolumeKey)
         UserDefaults.standard.set(selectedMicDeviceID, forKey: Self.selectedMicDeviceIDKey)
+        UserDefaults.standard.set(autoStartCapture, forKey: Self.autoStartCaptureKey)
     }
 
     private func loadPreferences() {
@@ -216,5 +264,6 @@ final class AppState: ObservableObject {
         if savedDeviceID != 0 {
             selectedMicDeviceID = AudioDeviceID(savedDeviceID)
         }
+        autoStartCapture = UserDefaults.standard.bool(forKey: Self.autoStartCaptureKey)
     }
 }
