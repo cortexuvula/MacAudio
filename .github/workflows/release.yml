@@ -179,38 +179,29 @@ jobs:
           STAGING="$RUNNER_TEMP/pkg_staging"
           mkdir -p "$STAGING"
 
-          # Use --root mode with component plists to disable bundle relocation.
-          # Without BundleIsRelocatable=false, macOS redirects the install to
-          # wherever it finds an existing copy (e.g. a developer's build/Debug/).
+          # Use --root mode with static component plists (BundleIsRelocatable=false).
+          # Without this, macOS redirects the install to wherever it finds an
+          # existing copy of the bundle (e.g. a developer's build/Debug/).
 
-          # Stage app into a root directory
           APP_ROOT="$STAGING/app_root"
           mkdir -p "$APP_ROOT/Applications"
           cp -R build/Release/MacAudio.app "$APP_ROOT/Applications/"
 
-          # Analyze to get default plist, then patch relocation off
-          pkgbuild --analyze --root "$APP_ROOT" "$STAGING/app-component.plist"
-          /usr/libexec/PlistBuddy -c "Set :0:BundleIsRelocatable false" "$STAGING/app-component.plist"
-
           pkgbuild \
             --root "$APP_ROOT" \
-            --component-plist "$STAGING/app-component.plist" \
+            --component-plist packaging/app-component.plist \
             --scripts packaging/scripts/app \
             --version "$VERSION" \
             --identifier com.macaudio.app.pkg \
             "$STAGING/MacAudioApp.pkg"
 
-          # Stage driver into a root directory
           DRIVER_ROOT="$STAGING/driver_root"
           mkdir -p "$DRIVER_ROOT/Library/Audio/Plug-Ins/HAL"
           cp -R build/Release/MacAudioDriver.driver "$DRIVER_ROOT/Library/Audio/Plug-Ins/HAL/"
 
-          pkgbuild --analyze --root "$DRIVER_ROOT" "$STAGING/driver-component.plist"
-          /usr/libexec/PlistBuddy -c "Set :0:BundleIsRelocatable false" "$STAGING/driver-component.plist"
-
           pkgbuild \
             --root "$DRIVER_ROOT" \
-            --component-plist "$STAGING/driver-component.plist" \
+            --component-plist packaging/driver-component.plist \
             --scripts packaging/scripts/driver \
             --version "$VERSION" \
             --identifier com.macaudio.driver.pkg \
