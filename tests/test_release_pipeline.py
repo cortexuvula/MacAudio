@@ -387,14 +387,11 @@ class TestNotarizeScript(unittest.TestCase):
     def test_strict_mode(self):
         self.assertIn("set -euo pipefail", self.content)
 
-    def test_api_key_auth(self):
-        """Must use App Store Connect API key (not Apple ID + password)."""
-        self.assertIn("--key", self.content)
-        self.assertIn("--key-id", self.content)
-        self.assertIn("--issuer", self.content)
-        # Must NOT use legacy Apple ID auth
-        self.assertNotIn("--apple-id", self.content,
-                          "notarize.sh must NOT use Apple ID auth — use API key")
+    def test_apple_id_auth(self):
+        """Must use Apple ID auth for notarization."""
+        self.assertIn("--apple-id", self.content)
+        self.assertIn("--password", self.content)
+        self.assertIn("--team-id", self.content)
 
     def test_timeout(self):
         self.assertIn("--timeout 15m", self.content)

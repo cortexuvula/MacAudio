@@ -1,19 +1,19 @@
 #!/bin/bash
 set -euo pipefail
 
-# Usage: notarize.sh <file-to-notarize> <api-key-id> <api-issuer-id> <api-key-path>
+# Usage: notarize.sh <file-to-notarize> <apple-id> <password> <team-id>
 FILE="$1"
-API_KEY_ID="$2"
-API_ISSUER_ID="$3"
-API_KEY_PATH="$4"
+APPLE_ID="$2"
+APPLE_ID_PASSWORD="$3"
+APPLE_TEAM_ID="$4"
 
 echo "Submitting $(basename "$FILE") for notarization..."
 
 set +e
 SUBMIT_OUT=$(xcrun notarytool submit "$FILE" \
-    --key "$API_KEY_PATH" \
-    --key-id "$API_KEY_ID" \
-    --issuer "$API_ISSUER_ID" \
+    --apple-id "$APPLE_ID" \
+    --password "$APPLE_ID_PASSWORD" \
+    --team-id "$APPLE_TEAM_ID" \
     --output-format json \
     --timeout 15m \
     --wait 2>&1)
@@ -35,9 +35,9 @@ if [ "$STATUS" != "Accepted" ]; then
     if [ -n "$SUBMISSION_ID" ]; then
         echo "=== Notarization Log ==="
         xcrun notarytool log "$SUBMISSION_ID" \
-            --key "$API_KEY_PATH" \
-            --key-id "$API_KEY_ID" \
-            --issuer "$API_ISSUER_ID" || true
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" || true
     fi
     exit 1
 fi
