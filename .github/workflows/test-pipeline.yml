@@ -44,8 +44,15 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - run: pip3 install pyyaml
-      - run: python3 -m unittest tests.test_release_pipeline -v
+      - name: Install PyYAML in venv
+        run: |
+          python3 -m venv /tmp/testvenv
+          source /tmp/testvenv/bin/activate
+          pip install pyyaml
+      - name: Run pipeline tests
+        run: |
+          source /tmp/testvenv/bin/activate
+          python3 -m unittest tests.test_release_pipeline -v
 
   test-source-integrity:
     runs-on: macos-15

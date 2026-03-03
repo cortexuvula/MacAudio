@@ -14,6 +14,7 @@ struct MacAudioApp: App {
     }
 }
 
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private let appState = AppState()
