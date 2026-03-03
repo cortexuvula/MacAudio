@@ -179,10 +179,44 @@ jobs:
           STAGING="$RUNNER_TEMP/pkg_staging"
           mkdir -p "$STAGING"
 
+          # Component plists to disable bundle relocation — without this,
+          # macOS relocates the install to wherever it finds an existing copy
+          # (e.g. a developer's build/Debug/ directory).
+          cat > "$STAGING/app-component.plist" << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <array>
+            <dict>
+              <key>BundleIsRelocatable</key>
+              <false/>
+              <key>BundleOverwriteAction</key>
+              <string>upgrade</string>
+            </dict>
+          </array>
+          </plist>
+          PLIST
+
+          cat > "$STAGING/driver-component.plist" << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <array>
+            <dict>
+              <key>BundleIsRelocatable</key>
+              <false/>
+              <key>BundleOverwriteAction</key>
+              <string>upgrade</string>
+            </dict>
+          </array>
+          </plist>
+          PLIST
+
           # App component package (with pre-install to stop running app)
           pkgbuild \
             --component build/Release/MacAudio.app \
             --install-location /Applications \
+            --component-plist "$STAGING/app-component.plist" \
             --scripts packaging/scripts/app \
             --version "$VERSION" \
             --identifier com.macaudio.app.pkg \
@@ -192,6 +226,7 @@ jobs:
           pkgbuild \
             --component build/Release/MacAudioDriver.driver \
             --install-location "/Library/Audio/Plug-Ins/HAL" \
+            --component-plist "$STAGING/driver-component.plist" \
             --scripts packaging/scripts/driver \
             --version "$VERSION" \
             --identifier com.macaudio.driver.pkg \
