@@ -1,5 +1,22 @@
 import Foundation
 
+enum DriverInstallError: LocalizedError {
+    case driverNotFound
+    case userCancelled
+    case scriptFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .driverNotFound:
+            return "Audio driver bundle not found in app resources"
+        case .userCancelled:
+            return "Driver installation was cancelled"
+        case .scriptFailed(let detail):
+            return "Driver installation failed: \(detail)"
+        }
+    }
+}
+
 enum DriverInstaller {
     static let driverBundleName = "MacAudioDriver.driver"
     static let halPluginDir = "/Library/Audio/Plug-Ins/HAL"
@@ -9,10 +26,10 @@ enum DriverInstaller {
             atPath: "\(halPluginDir)/\(driverBundleName)")
     }
 
-    static func installDriver(completion: @escaping (Bool) -> Void) {
+    static func installDriver(completion: @escaping (Result<Void, DriverInstallError>) -> Void) {
         guard let driverSource = Bundle.main.path(
             forResource: "MacAudioDriver", ofType: "driver") else {
-            completion(false)
+            completion(.failure(.driverNotFound))
             return
         }
 
@@ -27,9 +44,22 @@ enum DriverInstaller {
         DispatchQueue.global(qos: .userInitiated).async {
             var error: NSDictionary?
             NSAppleScript(source: script)?.executeAndReturnError(&error)
-            let success = error == nil
+
+            let result: Result<Void, DriverInstallError>
+            if let error {
+                let errorNumber = error[NSAppleScript.errorNumber] as? Int
+                if errorNumber == -128 {
+                    result = .failure(.userCancelled)
+                } else {
+                    let message = error[NSAppleScript.errorMessage] as? String ?? "Unknown error"
+                    result = .failure(.scriptFailed(message))
+                }
+            } else {
+                result = .success(())
+            }
+
             DispatchQueue.main.async {
-                completion(success)
+                completion(result)
             }
         }
     }

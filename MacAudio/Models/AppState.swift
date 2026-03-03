@@ -1,11 +1,17 @@
 import SwiftUI
 import CoreAudio
 import Combine
+import AVFoundation
 import os
+
+enum CaptureStatus {
+    case stopped, micOnly, both
+}
 
 @MainActor
 final class AppState: ObservableObject {
     @Published var isActive = false
+    @Published var captureStatus: CaptureStatus = .stopped
     @Published var micVolume: Float = AudioConstants.defaultGain {
         didSet {
             audioMixer?.micGain = micVolume
@@ -22,6 +28,8 @@ final class AppState: ObservableObject {
     @Published var availableMicDevices: [AudioDevice] = []
     @Published var driverInstalled = false
     @Published var lastError: String?
+    @Published var micPermissionGranted = false
+    @Published var screenCapturePermissionGranted = false
     private var audioMixer: AudioMixer?
     private var deviceChangeListener: AudioObjectPropertyListenerBlock?
     private let logger = Logger(subsystem: "com.macaudio.app", category: "state")
@@ -37,16 +45,20 @@ final class AppState: ObservableObject {
             let devices = AudioDeviceManager.getInputDevices()
             let defaultDevice = AudioDeviceManager.getDefaultInputDevice()
             let installed = DriverInstaller.isDriverInstalled()
+            let micAuth = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+            let screenAuth = CGPreflightScreenCaptureAccess()
 
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.availableMicDevices = devices
                 self.selectedMicDeviceID = defaultDevice
                 self.driverInstalled = installed
+                self.micPermissionGranted = micAuth
+                self.screenCapturePermissionGranted = screenAuth
                 self.deviceChangeListener = AudioDeviceManager.listenForDeviceChanges { [weak self] in
                     self?.refreshDevicesAsync()
                 }
-                self.logger.info("AppState setup complete, \(devices.count) mic devices found, driver=\(installed)")
+                self.logger.info("AppState setup complete, \(devices.count) mic devices found, driver=\(installed), mic=\(micAuth), screen=\(screenAuth)")
             }
         }
     }
@@ -83,11 +95,15 @@ final class AppState: ObservableObject {
     }
 
     func installDriver() {
-        DriverInstaller.installDriver { [weak self] success in
+        DriverInstaller.installDriver { [weak self] result in
             DispatchQueue.main.async {
-                self?.driverInstalled = success
-                if !success {
-                    self?.lastError = "Driver installation failed"
+                switch result {
+                case .success:
+                    self?.driverInstalled = true
+                    self?.lastError = nil
+                case .failure(let error):
+                    self?.driverInstalled = DriverInstaller.isDriverInstalled()
+                    self?.lastError = error.localizedDescription
                 }
             }
         }
@@ -109,6 +125,26 @@ final class AppState: ObservableObject {
         }
     }
 
+    func requestMicPermission() {
+        Task {
+            let granted = await AVCaptureDevice.requestAccess(for: .audio)
+            await MainActor.run {
+                self.micPermissionGranted = granted
+                if !granted {
+                    self.lastError = "Microphone access denied — grant in System Settings > Privacy > Microphone"
+                }
+            }
+        }
+    }
+
+    func requestScreenPermission() {
+        CGRequestScreenCaptureAccess()
+        // Re-check after a short delay (user must grant in System Settings)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.screenCapturePermissionGranted = CGPreflightScreenCaptureAccess()
+        }
+    }
+
     private func startAudio() {
         logger.info("startAudio called, driverInstalled=\(self.driverInstalled)")
 
@@ -117,6 +153,14 @@ final class AppState: ObservableObject {
             isActive = false
             logger.error("Driver not installed")
             return
+        }
+
+        if !micPermissionGranted {
+            requestMicPermission()
+        }
+
+        if !screenCapturePermissionGranted {
+            logger.warning("Screen capture permission not granted, system audio may not work")
         }
 
         lastError = nil
@@ -131,11 +175,13 @@ final class AppState: ObservableObject {
             try mixer.start(micDeviceID: deviceID)
             audioMixer = mixer
             isActive = true
-            // Show warning if system audio capture failed
             if let sysErr = mixer.systemCaptureError {
                 lastError = sysErr
+                captureStatus = .micOnly
+            } else {
+                captureStatus = .both
             }
-            logger.info("Audio started")
+            logger.info("Audio started, status=\(String(describing: self.captureStatus))")
         } catch {
             lastError = error.localizedDescription
             isActive = false
@@ -148,6 +194,7 @@ final class AppState: ObservableObject {
         audioMixer?.destroySharedMemory()
         audioMixer = nil
         isActive = false
+        captureStatus = .stopped
         lastError = nil
         logger.info("Audio stopped")
     }
