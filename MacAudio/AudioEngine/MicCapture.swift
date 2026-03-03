@@ -10,7 +10,7 @@ final class MicCapture {
     private let logger = Logger(subsystem: "com.macaudio.app", category: "mic")
 
     /// Callback delivers interleaved Float32 frames at the mic's native sample rate
-    var onAudioReceived: ((UnsafePointer<Float>, UInt32, Float64) -> Void)?
+    var onAudioReceived: ((UnsafePointer<Float>, UInt32, UInt32) -> Void)?
 
     func setInputDevice(_ id: AudioDeviceID) {
         deviceID = id
@@ -72,7 +72,7 @@ final class MicCapture {
         guard frameCount > 0 else { return }
 
         let floatPtr = data.assumingMemoryBound(to: Float.self)
-        onAudioReceived?(floatPtr, frameCount, Float64(channelCount))
+        onAudioReceived?(floatPtr, frameCount, channelCount)
     }
 
     func stop() {

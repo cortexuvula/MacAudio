@@ -1,5 +1,6 @@
 #include "SharedRingBuffer.h"
 #include <stdatomic.h>
+#include <stddef.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -15,6 +16,8 @@ struct SharedRingBuffer {
     uint8_t _padding[64 - (2 * 8 + 2 * 4)];
     float buffer[kMaxFrameSize];
 };
+
+_Static_assert(offsetof(struct SharedRingBuffer, buffer) == 64, "buffer must be at cache-line offset 64");
 
 static const uint64_t kSHMSize = sizeof(struct SharedRingBuffer);
 

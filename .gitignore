@@ -32,3 +32,13 @@ shm_stat.c
 *.p12
 *.secret
 credentials.*
+
+# Test venv
+tests/.venv/
+
+# Compiled test binary
+tests/test_ring_buffer
+
+# Python cache
+__pycache__/
+*.pyc

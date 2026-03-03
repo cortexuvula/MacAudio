@@ -1,5 +1,7 @@
 import SwiftUI
 import AppKit
+import Combine
+import os
 
 @main
 struct MacAudioApp: App {
@@ -13,13 +15,14 @@ struct MacAudioApp: App {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    private var statusItem: NSStatusItem!
+    private var statusItem: NSStatusItem?
     private let appState = AppState()
+    private let logger = Logger(subsystem: "com.macaudio.app", category: "delegate")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
 
-        if let button = statusItem.button {
+        if let button = statusItem?.button {
             button.image = NSImage(systemSymbolName: "speaker.fill", accessibilityDescription: "MacAudio")
         }
 
@@ -29,9 +32,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         appState.objectWillChange
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
-                DispatchQueue.main.async {
-                    self?.buildMenu()
-                }
+                self?.buildMenu()
             }
             .store(in: &cancellables)
     }
@@ -39,6 +40,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
 
     private func buildMenu() {
+        guard let statusItem else { return }
         let menu = NSMenu()
 
         let startStop = NSMenuItem(
@@ -105,9 +107,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggleActive() {
-        NSLog("MacAudio: toggleActive called, isActive=%d", appState.isActive ? 1 : 0)
+        logger.debug("toggleActive called, isActive=\(self.appState.isActive)")
         appState.toggleActive()
-        NSLog("MacAudio: after toggle, isActive=%d, error=%@", appState.isActive ? 1 : 0, appState.lastError ?? "none")
+        logger.debug("after toggle, isActive=\(self.appState.isActive), error=\(self.appState.lastError ?? "none")")
     }
 
     @objc private func selectMicDevice(_ sender: NSMenuItem) {
@@ -120,5 +122,3 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         appState.installDriver()
     }
 }
-
-import Combine

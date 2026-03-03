@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 DRIVER_NAME="MacAudioDriver.driver"
 HAL_DIR="/Library/Audio/Plug-Ins/HAL"
@@ -14,6 +14,8 @@ fi
 echo "Installing $DRIVER_NAME to $HAL_DIR..."
 sudo rm -rf "$HAL_DIR/$DRIVER_NAME"
 sudo cp -R "$BUILD_DIR/$DRIVER_NAME" "$HAL_DIR/"
+echo "Clearing xattrs..."
+sudo xattr -rc "$HAL_DIR/$DRIVER_NAME"
 echo "Restarting coreaudiod..."
-sudo killall coreaudiod
+sudo launchctl kickstart -kp system/com.apple.audio.coreaudiod 2>/dev/null || sudo killall coreaudiod
 echo "Done. 'MacAudio Virtual Device' should now appear in System Settings > Sound > Input."

@@ -108,7 +108,7 @@ final class AudioDeviceManager {
         )
 
         let block: AudioObjectPropertyListenerBlock = { _, _ in
-            DispatchQueue.main.async { callback() }
+            callback()
         }
 
         AudioObjectAddPropertyListenerBlock(

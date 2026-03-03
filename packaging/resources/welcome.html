@@ -1,7 +1,8 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="utf-8">
+    <title>MacAudio Installer</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
@@ -16,10 +17,30 @@
         li { margin-bottom: 4px; }
         .note {
             background: #f0f0f0;
+            border: 1px solid #ccc;
             border-radius: 6px;
             padding: 10px;
             margin-top: 16px;
             font-size: 12px;
+        }
+        .warning {
+            background: #fff8e1;
+            border: 1px solid #e0c547;
+            border-radius: 6px;
+            padding: 10px;
+            margin-top: 16px;
+            font-size: 12px;
+        }
+        @media (prefers-color-scheme: dark) {
+            body { color: #e0e0e0; }
+            .note {
+                background: #2a2a2a;
+                border-color: #555;
+            }
+            .warning {
+                background: #3a3520;
+                border-color: #8a7a30;
+            }
         }
     </style>
 </head>
@@ -34,6 +55,14 @@
     </ul>
 
     <p>An administrator password is required because the audio driver must be installed to a system directory.</p>
+
+    <div class="warning">
+        <strong>Permissions required after install:</strong>
+        <ul>
+            <li><strong>Microphone</strong> &mdash; macOS will prompt you automatically when you first start MacAudio.</li>
+            <li><strong>Screen &amp; System Audio Recording</strong> &mdash; you must enable this manually in <em>System Settings &gt; Privacy &amp; Security &gt; Screen &amp; System Audio Recording</em>.</li>
+        </ul>
+    </div>
 
     <div class="note">
         <strong>Requires macOS 14.2 or later.</strong>

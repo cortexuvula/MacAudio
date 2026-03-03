@@ -1,7 +1,8 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="utf-8">
+    <title>MacAudio Installation Complete</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
@@ -12,14 +13,34 @@
         }
         h1 { font-size: 18px; margin-bottom: 12px; }
         h2 { font-size: 14px; margin-top: 16px; margin-bottom: 8px; }
-        ol { padding-left: 20px; }
+        ol, ul { padding-left: 20px; }
         li { margin-bottom: 6px; }
+        code {
+            font-family: "SF Mono", Menlo, Monaco, monospace;
+            font-size: 12px;
+            background: #f0f0f0;
+            padding: 1px 4px;
+            border-radius: 3px;
+        }
         .note {
             background: #f0f0f0;
+            border: 1px solid #ccc;
             border-radius: 6px;
             padding: 10px;
             margin-top: 16px;
             font-size: 12px;
+        }
+        a { color: #0066cc; }
+        @media (prefers-color-scheme: dark) {
+            body { color: #e0e0e0; }
+            code {
+                background: #2a2a2a;
+            }
+            .note {
+                background: #2a2a2a;
+                border-color: #555;
+            }
+            a { color: #4da3ff; }
         }
     </style>
 </head>
@@ -33,11 +54,33 @@
         <li>Grant <strong>Microphone</strong> access when prompted.</li>
         <li>Grant <strong>Screen &amp; System Audio Recording</strong> access in System Settings &gt; Privacy &amp; Security.</li>
         <li>Click <strong>Start</strong> in the menu bar icon.</li>
-        <li>Select <strong>"MacAudio"</strong> as the input device in your audio/video app.</li>
+        <li>Select <strong>&ldquo;MacAudio&rdquo;</strong> as the input device in your audio/video app.</li>
     </ol>
 
     <div class="note">
         <strong>Tip:</strong> MacAudio runs in the menu bar. Look for its icon at the top of your screen.
     </div>
+
+    <div class="note">
+        <strong>Note:</strong> Audio playback was briefly interrupted during installation because the audio system was restarted to load the new driver.
+    </div>
+
+    <h2>Troubleshooting</h2>
+    <p>If the &ldquo;MacAudio&rdquo; device does not appear in your audio apps:</p>
+    <ol>
+        <li>Restart your Mac.</li>
+        <li>Verify the driver is loaded: open Terminal and run <code>system_profiler SPAudioDataType | grep MacAudio</code></li>
+    </ol>
+
+    <h2>Uninstalling</h2>
+    <p>To remove MacAudio, run the <strong>Uninstall MacAudio</strong> script included in the DMG, or manually:</p>
+    <ol>
+        <li>Quit MacAudio from the menu bar.</li>
+        <li>Delete <code>/Applications/MacAudio.app</code></li>
+        <li>Delete <code>/Library/Audio/Plug-Ins/HAL/MacAudioDriver.driver</code> (requires admin)</li>
+        <li>Restart your Mac or run <code>sudo killall coreaudiod</code></li>
+    </ol>
+
+    <p><a href="https://github.com/cortexuvula/MacAudio/issues">Need help? Report an issue on GitHub.</a></p>
 </body>
 </html>

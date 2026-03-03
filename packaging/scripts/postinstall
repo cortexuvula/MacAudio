@@ -2,6 +2,8 @@
 # Post-install script for MacAudioDriver
 # Remove quarantine/provenance xattrs that prevent driver loading on macOS Tahoe
 xattr -rc "/Library/Audio/Plug-Ins/HAL/MacAudioDriver.driver" 2>/dev/null
-# Restart coreaudiod so it discovers the new driver
-killall coreaudiod 2>/dev/null
+# Gracefully restart coreaudiod so it discovers the new driver
+# launchctl kickstart is the supported API; fall back to killall
+launchctl kickstart -k system/com.apple.audio.coreaudiod 2>/dev/null || \
+  killall coreaudiod 2>/dev/null
 exit 0

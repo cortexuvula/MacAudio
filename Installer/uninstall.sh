@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 DRIVER_NAME="MacAudioDriver.driver"
 HAL_DIR="/Library/Audio/Plug-Ins/HAL"

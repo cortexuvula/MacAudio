@@ -1,0 +1,55 @@
+name: Test Pipeline Artifacts
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'packaging/**'
+      - 'tests/**'
+      - 'MacAudioDriver/**'
+      - 'MacAudio/AudioEngine/**'
+      - 'MacAudio/Models/**'
+      - 'MacAudio/MacAudio.entitlements'
+      - 'project.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/release.yml'
+      - 'packaging/**'
+      - 'tests/**'
+      - 'MacAudioDriver/**'
+      - 'MacAudio/AudioEngine/**'
+      - 'MacAudio/Models/**'
+      - 'MacAudio/MacAudio.entitlements'
+      - 'project.yml'
+
+jobs:
+  test-c-ring-buffer:
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile ring buffer tests
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror \
+             -I MacAudioDriver \
+             -DkSHM_Name='"/macaudio_test_rb"' \
+             -o tests/test_ring_buffer \
+             tests/test_ring_buffer.c MacAudioDriver/SharedRingBuffer.c
+      - name: Run ring buffer tests
+        run: ./tests/test_ring_buffer
+
+  test-pipeline:
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip3 install pyyaml
+      - run: python3 -m unittest tests.test_release_pipeline -v
+
+  test-source-integrity:
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest tests.test_source_integrity -v

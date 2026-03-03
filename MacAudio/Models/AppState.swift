@@ -3,38 +3,46 @@ import CoreAudio
 import Combine
 import os
 
+@MainActor
 final class AppState: ObservableObject {
     @Published var isActive = false
-    @Published var micVolume: Float = 0.7 {
-        didSet { audioMixer?.micGain = micVolume }
+    @Published var micVolume: Float = AudioConstants.defaultGain {
+        didSet {
+            audioMixer?.micGain = micVolume
+            savePreferences()
+        }
     }
-    @Published var systemVolume: Float = 0.7 {
-        didSet { audioMixer?.systemGain = systemVolume }
+    @Published var systemVolume: Float = AudioConstants.defaultGain {
+        didSet {
+            audioMixer?.systemGain = systemVolume
+            savePreferences()
+        }
     }
     @Published var selectedMicDeviceID: AudioDeviceID = kAudioObjectUnknown
     @Published var availableMicDevices: [AudioDevice] = []
     @Published var driverInstalled = false
     @Published var lastError: String?
-    @Published var isReady = false
-
     private var audioMixer: AudioMixer?
     private var deviceChangeListener: AudioObjectPropertyListenerBlock?
     private let logger = Logger(subsystem: "com.macaudio.app", category: "state")
 
+    private static let micVolumeKey = "micVolume"
+    private static let systemVolumeKey = "systemVolume"
+    private static let selectedMicDeviceIDKey = "selectedMicDeviceID"
+
     init() {
-        // Do CoreAudio queries on background thread, update UI on main
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        loadPreferences()
+
+        Task.detached {
             let devices = AudioDeviceManager.getInputDevices()
             let defaultDevice = AudioDeviceManager.getDefaultInputDevice()
             let installed = DriverInstaller.isDriverInstalled()
 
-            DispatchQueue.main.async {
-                guard let self = self else { return }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
                 self.availableMicDevices = devices
                 self.selectedMicDeviceID = defaultDevice
                 self.driverInstalled = installed
-                self.isReady = true
-
                 self.deviceChangeListener = AudioDeviceManager.listenForDeviceChanges { [weak self] in
                     self?.refreshDevicesAsync()
                 }
@@ -43,8 +51,24 @@ final class AppState: ObservableObject {
         }
     }
 
+    nonisolated deinit {
+        if let listener = deviceChangeListener {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDevices,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectRemovePropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject),
+                &address,
+                DispatchQueue.main,
+                listener
+            )
+        }
+    }
+
     func toggleActive() {
-        NSLog("toggleActive called, isActive=\(isActive)")
+        logger.debug("toggleActive called, isActive=\(self.isActive)")
         if isActive {
             stopAudio()
         } else {
@@ -55,6 +79,7 @@ final class AppState: ObservableObject {
     func updateMicDevice(_ deviceID: AudioDeviceID) {
         selectedMicDeviceID = deviceID
         audioMixer?.setMicDevice(deviceID)
+        savePreferences()
     }
 
     func installDriver() {
@@ -69,12 +94,12 @@ final class AppState: ObservableObject {
     }
 
     func refreshDevicesAsync() {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        Task.detached {
             let devices = AudioDeviceManager.getInputDevices()
             let defaultDevice = AudioDeviceManager.getDefaultInputDevice()
 
-            DispatchQueue.main.async {
-                guard let self = self else { return }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
                 self.availableMicDevices = devices
                 if self.selectedMicDeviceID == kAudioObjectUnknown ||
                    !devices.contains(where: { $0.id == self.selectedMicDeviceID }) {
@@ -84,18 +109,13 @@ final class AppState: ObservableObject {
         }
     }
 
-    func checkDriverInstalled() {
-        driverInstalled = DriverInstaller.isDriverInstalled()
-    }
-
     private func startAudio() {
         logger.info("startAudio called, driverInstalled=\(self.driverInstalled)")
-        NSLog("startAudio called, driverInstalled=\(driverInstalled)")
 
         guard driverInstalled else {
             lastError = "Please install the audio driver first"
             isActive = false
-            NSLog("ERROR: driver not installed")
+            logger.error("Driver not installed")
             return
         }
 
@@ -107,7 +127,7 @@ final class AppState: ObservableObject {
         do {
             let deviceID = selectedMicDeviceID != kAudioObjectUnknown
                 ? selectedMicDeviceID : nil
-            NSLog("Starting mixer with device: \(String(describing: deviceID))")
+            logger.info("Starting mixer with device: \(String(describing: deviceID))")
             try mixer.start(micDeviceID: deviceID)
             audioMixer = mixer
             isActive = true
@@ -115,21 +135,39 @@ final class AppState: ObservableObject {
             if let sysErr = mixer.systemCaptureError {
                 lastError = sysErr
             }
-            NSLog("Audio started successfully, isActive=\(isActive)")
             logger.info("Audio started")
         } catch {
             lastError = error.localizedDescription
             isActive = false
-            NSLog("ERROR starting audio: \(error)")
             logger.error("Failed to start audio: \(error.localizedDescription)")
         }
     }
 
     private func stopAudio() {
         audioMixer?.stop()
+        audioMixer?.destroySharedMemory()
         audioMixer = nil
         isActive = false
         lastError = nil
         logger.info("Audio stopped")
+    }
+
+    private func savePreferences() {
+        UserDefaults.standard.set(micVolume, forKey: Self.micVolumeKey)
+        UserDefaults.standard.set(systemVolume, forKey: Self.systemVolumeKey)
+        UserDefaults.standard.set(selectedMicDeviceID, forKey: Self.selectedMicDeviceIDKey)
+    }
+
+    private func loadPreferences() {
+        if UserDefaults.standard.object(forKey: Self.micVolumeKey) != nil {
+            micVolume = UserDefaults.standard.float(forKey: Self.micVolumeKey)
+        }
+        if UserDefaults.standard.object(forKey: Self.systemVolumeKey) != nil {
+            systemVolume = UserDefaults.standard.float(forKey: Self.systemVolumeKey)
+        }
+        let savedDeviceID = UserDefaults.standard.integer(forKey: Self.selectedMicDeviceIDKey)
+        if savedDeviceID != 0 {
+            selectedMicDeviceID = AudioDeviceID(savedDeviceID)
+        }
     }
 }

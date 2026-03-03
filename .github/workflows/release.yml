@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (without v prefix, e.g. 1.0.0)'
+        required: true
 
 permissions:
   contents: write
@@ -23,20 +28,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── Extract version from tag ──────────────────────────────
+      # ── Extract version from tag or workflow_dispatch input ───
       - name: Extract version
         id: version
         run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            TAG="${{ github.event.inputs.version }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/v}"
+          fi
           echo "version=$TAG" >> "$GITHUB_OUTPUT"
           echo "tag=v$TAG" >> "$GITHUB_OUTPUT"
 
       # ── Setup ─────────────────────────────────────────────────
       - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_${{ env.XCODE_VERSION }}.app
+        run: |
+          XCODE_PATH="/Applications/Xcode_${{ env.XCODE_VERSION }}.app"
+          if [ ! -d "$XCODE_PATH" ]; then
+            echo "::error::Xcode ${{ env.XCODE_VERSION }} not found. Available:"
+            ls /Applications/ | grep Xcode
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE_PATH"
 
       - name: Install xcodegen
         run: brew install xcodegen
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
 
       - name: Generate Xcode project
         run: xcodegen generate
@@ -62,14 +80,6 @@ jobs:
           /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable '\$(EXECUTABLE_NAME)'" \
             MacAudioDriver/Info.plist
 
-      - name: Inject version into plists
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          for plist in MacAudio/Info.plist MacAudioDriver/Info.plist; do
-            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$plist"
-            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$plist"
-          done
-
       # ── Import signing certificates ───────────────────────────
       - name: Import certificates
         env:
@@ -87,11 +97,11 @@ jobs:
 
           # Download and import Apple WWDR intermediate certificates
           # Required for Developer ID certificate chain validation
-          curl -sL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer \
+          curl -sfL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer \
             -o "$RUNNER_TEMP/DeveloperIDG2CA.cer"
           security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign
 
-          curl -sL https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer \
+          curl -sfL https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer \
             -o "$RUNNER_TEMP/AppleWWDRCAG3.cer"
           security import "$RUNNER_TEMP/AppleWWDRCAG3.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign
 
@@ -122,13 +132,18 @@ jobs:
           # Save keychain path for cleanup
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
 
-      # ── Build ─────────────────────────────────────────────────
+      # ── Build (universal binary) ──────────────────────────────
       - name: Build driver
         run: |
+          VERSION="${{ steps.version.outputs.version }}"
           xcodebuild -project MacAudio.xcodeproj \
             -target MacAudioDriver \
             -configuration Release \
             clean build \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+            MARKETING_VERSION="$VERSION" \
+            CURRENT_PROJECT_VERSION="$VERSION" \
             CODE_SIGN_IDENTITY="Developer ID Application" \
             DEVELOPMENT_TEAM=${{ secrets.APPLE_TEAM_ID }} \
             CODE_SIGN_STYLE=Manual \
@@ -137,10 +152,15 @@ jobs:
 
       - name: Build app
         run: |
+          VERSION="${{ steps.version.outputs.version }}"
           xcodebuild -project MacAudio.xcodeproj \
             -target MacAudio \
             -configuration Release \
             build \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+            MARKETING_VERSION="$VERSION" \
+            CURRENT_PROJECT_VERSION="$VERSION" \
             CODE_SIGN_IDENTITY="Developer ID Application" \
             DEVELOPMENT_TEAM=${{ secrets.APPLE_TEAM_ID }} \
             CODE_SIGN_STYLE=Manual \
@@ -207,6 +227,8 @@ jobs:
           mkdir -p "$DMG_STAGING"
 
           cp "$RUNNER_TEMP/MacAudio-$VERSION.pkg" "$DMG_STAGING/"
+          cp packaging/resources/uninstall.sh "$DMG_STAGING/Uninstall MacAudio.command"
+          chmod +x "$DMG_STAGING/Uninstall MacAudio.command"
 
           hdiutil create \
             -volname "MacAudio $VERSION" \
@@ -216,77 +238,40 @@ jobs:
             "$RUNNER_TEMP/MacAudio-$VERSION.dmg"
 
       # ── Notarize ──────────────────────────────────────────────
-      - name: Notarize DMG
+      - name: Setup notarization API key
         env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+        run: |
+          API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          echo "$API_KEY_BASE64" | base64 --decode > "$API_KEY_PATH"
+          echo "API_KEY_PATH=$API_KEY_PATH" >> "$GITHUB_ENV"
+
+      - name: Notarize DMG
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-
-          # Submit and capture output to extract submission ID
-          SUBMIT_OUT=$(xcrun notarytool submit \
+          ./packaging/scripts/notarize.sh \
             "$RUNNER_TEMP/MacAudio-$VERSION.dmg" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_ID_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --output-format json \
-            --wait) || true
-
-          echo "$SUBMIT_OUT"
-          SUBMISSION_ID=$(echo "$SUBMIT_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || true)
-          STATUS=$(echo "$SUBMIT_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])" 2>/dev/null || true)
-
-          # If notarization failed, fetch and display the log
-          if [ "$STATUS" != "Accepted" ]; then
-            echo "::error::Notarization failed with status: $STATUS"
-            if [ -n "$SUBMISSION_ID" ]; then
-              echo "=== Notarization Log ==="
-              xcrun notarytool log "$SUBMISSION_ID" \
-                --apple-id "$APPLE_ID" \
-                --password "$APPLE_ID_PASSWORD" \
-                --team-id "$APPLE_TEAM_ID" || true
-            fi
-            exit 1
-          fi
-
-          xcrun stapler staple "$RUNNER_TEMP/MacAudio-$VERSION.dmg"
+            "${{ secrets.APP_STORE_CONNECT_KEY_ID }}" \
+            "${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}" \
+            "$API_KEY_PATH"
 
       - name: Notarize pkg
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-
-          SUBMIT_OUT=$(xcrun notarytool submit \
+          ./packaging/scripts/notarize.sh \
             "$RUNNER_TEMP/MacAudio-$VERSION.pkg" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_ID_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --output-format json \
-            --wait) || true
-
-          echo "$SUBMIT_OUT"
-          SUBMISSION_ID=$(echo "$SUBMIT_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || true)
-          STATUS=$(echo "$SUBMIT_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])" 2>/dev/null || true)
-
-          if [ "$STATUS" != "Accepted" ]; then
-            echo "::error::Notarization failed with status: $STATUS"
-            if [ -n "$SUBMISSION_ID" ]; then
-              echo "=== Notarization Log ==="
-              xcrun notarytool log "$SUBMISSION_ID" \
-                --apple-id "$APPLE_ID" \
-                --password "$APPLE_ID_PASSWORD" \
-                --team-id "$APPLE_TEAM_ID" || true
-            fi
-            exit 1
-          fi
-
-          xcrun stapler staple "$RUNNER_TEMP/MacAudio-$VERSION.pkg"
+            "${{ secrets.APP_STORE_CONNECT_KEY_ID }}" \
+            "${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}" \
+            "$API_KEY_PATH"
 
       # ── Release ───────────────────────────────────────────────
+      - name: Generate checksums
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          cd "$RUNNER_TEMP"
+          shasum -a 256 "MacAudio-$VERSION.dmg" "MacAudio-$VERSION.pkg" \
+            | tee "MacAudio-$VERSION-SHA256SUMS.txt"
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -294,16 +279,20 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           TAG="${{ steps.version.outputs.tag }}"
 
+          gh release delete "$TAG" --yes 2>/dev/null || true
+
           gh release create "$TAG" \
             "$RUNNER_TEMP/MacAudio-$VERSION.dmg" \
             "$RUNNER_TEMP/MacAudio-$VERSION.pkg" \
+            "$RUNNER_TEMP/MacAudio-$VERSION-SHA256SUMS.txt" \
             --title "MacAudio $VERSION" \
             --generate-notes
 
       # ── Cleanup ───────────────────────────────────────────────
-      - name: Delete temporary keychain
+      - name: Cleanup
         if: always()
         run: |
           if [ -n "$KEYCHAIN_PATH" ]; then
             security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
           fi
+          rm -f "$RUNNER_TEMP"/*.p12 "$RUNNER_TEMP"/*.cer "$RUNNER_TEMP"/*.p8 2>/dev/null || true

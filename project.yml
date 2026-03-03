@@ -5,9 +5,24 @@ options:
     macOS: "14.2"
   xcodeVersion: "16.0"
 
+configs:
+  Debug: debug
+  Release: release
+
 settings:
   base:
     MACOSX_DEPLOYMENT_TARGET: "14.2"
+  configs:
+    Debug:
+      SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+      GCC_OPTIMIZATION_LEVEL: "0"
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG"
+      GCC_PREPROCESSOR_DEFINITIONS:
+        - "DEBUG=1"
+    Release:
+      SWIFT_OPTIMIZATION_LEVEL: "-O"
+      GCC_OPTIMIZATION_LEVEL: "s"
+      SWIFT_COMPILATION_MODE: "wholemodule"
 
 targets:
   MacAudio:
@@ -64,6 +79,7 @@ targets:
         CODE_SIGN_IDENTITY: "Developer ID Application"
         DEVELOPMENT_TEAM: RB4QV9W52C
         CODE_SIGN_STYLE: Manual
+        ENABLE_HARDENED_RUNTIME: true
         OTHER_LDFLAGS:
           - "-framework CoreAudio"
           - "-framework CoreFoundation"

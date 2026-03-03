@@ -16,7 +16,22 @@
         </allowed-os-versions>
     </volume-check>
 
+    <!-- Custom version check with friendly error message -->
+    <installation-check script="installCheck();" />
+    <script>
+function installCheck() {
+    if (!(system.compareVersions(system.version.ProductVersion, '14.2') >= 0)) {
+        my.result.title = 'macOS 14.2 Required';
+        my.result.message = 'MacAudio requires macOS 14.2 (Sonoma) or later because it uses the Core Audio Taps API. Please update your Mac before installing.';
+        my.result.type = 'Fatal';
+        return false;
+    }
+    return true;
+}
+    </script>
+
     <welcome file="welcome.html" mime-type="text/html" />
+    <license file="license.html" mime-type="text/html" />
     <conclusion file="conclusion.html" mime-type="text/html" />
 
     <choices-outline>

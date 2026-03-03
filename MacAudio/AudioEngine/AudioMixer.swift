@@ -8,7 +8,7 @@ final class AudioMixer {
     private let logger = Logger(subsystem: "com.macaudio.app", category: "mixer")
 
     // Lock-free mic buffer for cross-thread communication
-    private let micBufferLock = NSLock()
+    private var micBufferLock = os_unfair_lock()
     private var micBuffer = [Float](repeating: 0, count: Int(AudioConstants.ringBufferFrames) * Int(AudioConstants.numChannels))
     private var micWritePos: Int = 0
     private var micReadPos: Int = 0
@@ -16,8 +16,19 @@ final class AudioMixer {
     private(set) var isRunning = false
     private(set) var systemCaptureError: String?
 
-    var micGain: Float = 0.7
-    var systemGain: Float = 0.7
+    // Atomic gain accessors via os_unfair_lock
+    private var _micGain: Float = AudioConstants.defaultGain
+    private var _systemGain: Float = AudioConstants.defaultGain
+    private var gainLock = os_unfair_lock()
+
+    var micGain: Float {
+        get { os_unfair_lock_lock(&gainLock); defer { os_unfair_lock_unlock(&gainLock) }; return _micGain }
+        set { os_unfair_lock_lock(&gainLock); _micGain = newValue; os_unfair_lock_unlock(&gainLock) }
+    }
+    var systemGain: Float {
+        get { os_unfair_lock_lock(&gainLock); defer { os_unfair_lock_unlock(&gainLock) }; return _systemGain }
+        set { os_unfair_lock_lock(&gainLock); _systemGain = newValue; os_unfair_lock_unlock(&gainLock) }
+    }
 
     func start(micDeviceID: AudioDeviceID? = nil) throws {
         guard !isRunning else { return }
@@ -65,6 +76,10 @@ final class AudioMixer {
         logger.info("Audio mixer stopped")
     }
 
+    func destroySharedMemory() {
+        ringBufferWriter.destroy()
+    }
+
     func setMicDevice(_ deviceID: AudioDeviceID) {
         micCapture.setInputDevice(deviceID)
     }
@@ -76,19 +91,19 @@ final class AudioMixer {
         let outChannels = Int(AudioConstants.numChannels)
         let bufferCapacity = micBuffer.count
 
-        micBufferLock.lock()
-        defer { micBufferLock.unlock() }
+        os_unfair_lock_lock(&micBufferLock)
+        defer { os_unfair_lock_unlock(&micBufferLock) }
 
         for frame in 0..<frames {
             let writeIdx = (micWritePos + frame * outChannels) % bufferCapacity
 
             if channelCount >= outChannels {
-                // Interleaved stereo or more — copy directly
+                // Interleaved stereo or more -- copy directly
                 for ch in 0..<outChannels {
                     micBuffer[(writeIdx + ch) % bufferCapacity] = floatPtr[frame * channelCount + ch]
                 }
             } else {
-                // Mono mic — duplicate to stereo
+                // Mono mic -- duplicate to stereo
                 let sample = floatPtr[frame]
                 for ch in 0..<outChannels {
                     micBuffer[(writeIdx + ch) % bufferCapacity] = sample
@@ -133,7 +148,7 @@ final class AudioMixer {
         }
 
         // Read mic audio and mix in
-        micBufferLock.lock()
+        os_unfair_lock_lock(&micBufferLock)
         let micGainVal = self.micGain
         let bufferCapacity = micBuffer.count
         let available: Int
@@ -149,7 +164,7 @@ final class AudioMixer {
             mixedBuffer[i] += micBuffer[readIdx] * micGainVal
         }
         micReadPos = (micReadPos + samplesToRead) % bufferCapacity
-        micBufferLock.unlock()
+        os_unfair_lock_unlock(&micBufferLock)
 
         // Hard clip
         for i in 0..<mixedBuffer.count {

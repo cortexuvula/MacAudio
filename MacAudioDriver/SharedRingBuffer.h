@@ -7,7 +7,9 @@
 extern "C" {
 #endif
 
+#ifndef kSHM_Name
 #define kSHM_Name           "/macaudio_ringbuffer"
+#endif
 #define kRingBufferFrames   16384u
 #define kNumChannels        2u
 #define kMaxFrameSize       (kRingBufferFrames * kNumChannels)

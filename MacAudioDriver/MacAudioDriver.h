@@ -24,8 +24,8 @@ enum {
 #define kDevice_DefaultSampleRate   48000.0
 #define kDevice_RingBufferFrames    16384
 
-static const Float64 kSupportedSampleRates[] = {44100.0, 48000.0, 96000.0};
 #define kNumSupportedSampleRates    3
+extern const Float64 kSupportedSampleRates[kNumSupportedSampleRates];
 
 void* MacAudioDriver_Create(CFAllocatorRef allocator, CFUUIDRef requestedTypeUUID);
 

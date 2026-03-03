@@ -34,20 +34,4 @@ enum DriverInstaller {
         }
     }
 
-    static func uninstallDriver(completion: @escaping (Bool) -> Void) {
-        let script = """
-        do shell script "rm -rf '\(halPluginDir)/\(driverBundleName)' && \
-        killall coreaudiod" \
-        with administrator privileges
-        """
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            var error: NSDictionary?
-            NSAppleScript(source: script)?.executeAndReturnError(&error)
-            let success = error == nil
-            DispatchQueue.main.async {
-                completion(success)
-            }
-        }
-    }
 }
