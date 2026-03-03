@@ -9,6 +9,7 @@ Validates file structure, syntax, and content patterns for:
 """
 
 import os
+import plistlib
 import re
 import stat
 import subprocess
@@ -24,6 +25,13 @@ def _read(relpath):
     path = os.path.join(ROOT, relpath)
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
+
+
+def _read_plist(relpath):
+    """Read a plist file and return its parsed contents."""
+    path = os.path.join(ROOT, relpath)
+    with open(path, "rb") as f:
+        return plistlib.load(f)
 
 
 def _is_executable(relpath):
@@ -537,6 +545,59 @@ class TestDevUninstallScript(unittest.TestCase):
     def test_strict_mode(self):
         self.assertIn("set -euo pipefail", self.content,
                        "uninstall.sh must use set -euo pipefail")
+
+
+# ---------------------------------------------------------------------------
+# Component plists — disable bundle relocation
+# ---------------------------------------------------------------------------
+class TestAppComponentPlist(unittest.TestCase):
+    """Validate packaging/app-component.plist disables relocation."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.plist = _read_plist("packaging/app-component.plist")
+
+    def test_is_array(self):
+        self.assertIsInstance(self.plist, list,
+                              "Component plist must be an array")
+
+    def test_has_entries(self):
+        self.assertGreaterEqual(len(self.plist), 1,
+                                "Component plist must have at least one entry")
+
+    def test_app_not_relocatable(self):
+        self.assertFalse(self.plist[0].get("BundleIsRelocatable", True),
+                         "App bundle must have BundleIsRelocatable=false")
+
+    def test_embedded_driver_not_relocatable(self):
+        self.assertGreaterEqual(len(self.plist), 2,
+                                "Must have entry for embedded MacAudioDriver.driver")
+        self.assertFalse(self.plist[1].get("BundleIsRelocatable", True),
+                         "Embedded driver must have BundleIsRelocatable=false")
+
+    def test_overwrite_action_upgrade(self):
+        self.assertEqual(self.plist[0].get("BundleOverwriteAction"), "upgrade")
+
+
+class TestDriverComponentPlist(unittest.TestCase):
+    """Validate packaging/driver-component.plist disables relocation."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.plist = _read_plist("packaging/driver-component.plist")
+
+    def test_is_array(self):
+        self.assertIsInstance(self.plist, list)
+
+    def test_has_one_entry(self):
+        self.assertEqual(len(self.plist), 1)
+
+    def test_driver_not_relocatable(self):
+        self.assertFalse(self.plist[0].get("BundleIsRelocatable", True),
+                         "Driver must have BundleIsRelocatable=false")
+
+    def test_overwrite_action_upgrade(self):
+        self.assertEqual(self.plist[0].get("BundleOverwriteAction"), "upgrade")
 
 
 # ---------------------------------------------------------------------------

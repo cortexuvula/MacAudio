@@ -736,5 +736,197 @@ class TestDriverLogging(unittest.TestCase):
                            f"gLog should be used in many places, found {count} uses")
 
 
+# ---------------------------------------------------------------------------
+# v0.3.0 — DriverInstallError enum
+# ---------------------------------------------------------------------------
+
+class TestDriverInstallError(unittest.TestCase):
+    """DriverInstaller must define typed errors and return Result."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = _read("MacAudio/Utilities/DriverInstaller.swift")
+
+    def test_error_enum_exists(self):
+        self.assertIn("enum DriverInstallError", self.src,
+                       "DriverInstaller must define DriverInstallError enum")
+
+    def test_conforms_to_localized_error(self):
+        self.assertIn("LocalizedError", self.src,
+                       "DriverInstallError must conform to LocalizedError")
+
+    def test_has_driver_not_found_case(self):
+        self.assertIn("driverNotFound", self.src)
+
+    def test_has_user_cancelled_case(self):
+        self.assertIn("userCancelled", self.src)
+
+    def test_has_script_failed_case(self):
+        self.assertIn("scriptFailed", self.src)
+
+    def test_returns_result_type(self):
+        self.assertIn("Result<Void, DriverInstallError>", self.src,
+                       "installDriver must return Result<Void, DriverInstallError>")
+
+    def test_detects_user_cancel_error_code(self):
+        self.assertIn("-128", self.src,
+                       "Must detect NSAppleScript error code -128 (user cancelled)")
+
+
+# ---------------------------------------------------------------------------
+# v0.3.0 — Permission pre-checks
+# ---------------------------------------------------------------------------
+
+class TestPermissionPreChecks(unittest.TestCase):
+    """AppState must check and expose mic/screen capture permissions."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app_state = _read("MacAudio/Models/AppState.swift")
+        cls.app_delegate = _read("MacAudio/MacAudioApp.swift")
+
+    def test_mic_permission_property(self):
+        self.assertIn("micPermissionGranted", self.app_state,
+                       "AppState must have micPermissionGranted property")
+
+    def test_screen_capture_permission_property(self):
+        self.assertIn("screenCapturePermissionGranted", self.app_state,
+                       "AppState must have screenCapturePermissionGranted property")
+
+    def test_av_foundation_import(self):
+        self.assertIn("import AVFoundation", self.app_state,
+                       "AppState must import AVFoundation for mic permission checks")
+
+    def test_checks_mic_authorization_status(self):
+        self.assertIn("authorizationStatus", self.app_state,
+                       "AppState must check AVCaptureDevice.authorizationStatus")
+
+    def test_checks_screen_capture_preflight(self):
+        self.assertIn("CGPreflightScreenCaptureAccess", self.app_state,
+                       "AppState must call CGPreflightScreenCaptureAccess")
+
+    def test_request_mic_permission_method(self):
+        self.assertIn("func requestMicPermission", self.app_state,
+                       "AppState must have requestMicPermission method")
+
+    def test_request_screen_permission_method(self):
+        self.assertIn("func requestScreenPermission", self.app_state,
+                       "AppState must have requestScreenPermission method")
+
+    def test_request_screen_calls_cg_api(self):
+        self.assertIn("CGRequestScreenCaptureAccess", self.app_state,
+                       "requestScreenPermission must call CGRequestScreenCaptureAccess")
+
+    def test_delegate_has_permission_actions(self):
+        self.assertIn("requestMicPermission", self.app_delegate,
+                       "AppDelegate must have requestMicPermission action")
+        self.assertIn("requestScreenPermission", self.app_delegate,
+                       "AppDelegate must have requestScreenPermission action")
+
+    def test_menu_shows_permission_warnings(self):
+        self.assertIn("Grant Access", self.app_delegate,
+                       "Menu must show mic permission guidance")
+        self.assertIn("Screen Recording", self.app_delegate,
+                       "Menu must show screen recording permission guidance")
+
+
+# ---------------------------------------------------------------------------
+# v0.3.0 — Capture status indicator
+# ---------------------------------------------------------------------------
+
+class TestCaptureStatusIndicator(unittest.TestCase):
+    """AppState must track capture status and menu must show dynamic icon."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app_state = _read("MacAudio/Models/AppState.swift")
+        cls.app_delegate = _read("MacAudio/MacAudioApp.swift")
+
+    def test_capture_status_enum(self):
+        self.assertIn("enum CaptureStatus", self.app_state,
+                       "Must define CaptureStatus enum")
+
+    def test_capture_status_cases(self):
+        self.assertIn("stopped", self.app_state)
+        self.assertIn("micOnly", self.app_state)
+        # 'both' is a common word, so check in context
+        self.assertRegex(self.app_state, r"case\s+.*both",
+                         "CaptureStatus must have .both case")
+
+    def test_capture_status_property(self):
+        self.assertIn("captureStatus", self.app_state,
+                       "AppState must have captureStatus property")
+
+    def test_start_sets_capture_status(self):
+        self.assertRegex(self.app_state, r"captureStatus\s*=\s*\.both",
+                         "startAudio must set captureStatus to .both on success")
+        self.assertRegex(self.app_state, r"captureStatus\s*=\s*\.micOnly",
+                         "startAudio must set captureStatus to .micOnly on system capture failure")
+
+    def test_stop_resets_capture_status(self):
+        self.assertRegex(self.app_state, r"captureStatus\s*=\s*\.stopped",
+                         "stopAudio must set captureStatus to .stopped")
+
+    def test_dynamic_menu_bar_icon(self):
+        self.assertIn("speaker.wave.2.fill", self.app_delegate,
+                       "Menu bar must use speaker.wave.2.fill for both-active state")
+        self.assertIn("mic.fill", self.app_delegate,
+                       "Menu bar must use mic.fill for mic-only state")
+
+    def test_menu_shows_capture_status(self):
+        self.assertIn("Mic: Capturing", self.app_delegate,
+                       "Menu must show mic capture status")
+        self.assertIn("System Audio: Capturing", self.app_delegate,
+                       "Menu must show system audio capture status")
+
+
+# ---------------------------------------------------------------------------
+# v0.3.0 — Volume sliders in menu
+# ---------------------------------------------------------------------------
+
+class TestVolumeSliders(unittest.TestCase):
+    """Menu must have volume sliders with selective rebuild to avoid focus loss."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app_delegate = _read("MacAudio/MacAudioApp.swift")
+
+    def test_slider_factory_method(self):
+        self.assertIn("makeSliderMenuItem", self.app_delegate,
+                       "AppDelegate must have makeSliderMenuItem helper")
+
+    def test_uses_nsslider(self):
+        self.assertIn("NSSlider", self.app_delegate,
+                       "Volume sliders must use NSSlider")
+
+    def test_mic_slider_action(self):
+        self.assertIn("micSliderChanged", self.app_delegate,
+                       "Must have micSliderChanged action")
+
+    def test_system_slider_action(self):
+        self.assertIn("systemSliderChanged", self.app_delegate,
+                       "Must have systemSliderChanged action")
+
+    def test_slider_labels(self):
+        self.assertIn("Mic Volume", self.app_delegate,
+                       "Menu must have Mic Volume slider")
+        self.assertIn("System Volume", self.app_delegate,
+                       "Menu must have System Volume slider")
+
+    def test_selective_rebuild_not_object_will_change(self):
+        """Menu must observe specific properties, not objectWillChange (causes slider focus loss)."""
+        self.assertNotIn("objectWillChange", self.app_delegate,
+                          "Must NOT use objectWillChange (causes slider focus loss during drag)")
+        self.assertIn("Publishers.MergeMany", self.app_delegate,
+                       "Must use Publishers.MergeMany for selective property observation")
+
+    def test_volume_not_in_rebuild_publishers(self):
+        """micVolume/systemVolume must NOT be in the rebuild publishers."""
+        self.assertNotIn("$micVolume", self.app_delegate,
+                          "micVolume must NOT trigger menu rebuild")
+        self.assertNotIn("$systemVolume", self.app_delegate,
+                          "systemVolume must NOT trigger menu rebuild")
+
+
 if __name__ == "__main__":
     unittest.main()
