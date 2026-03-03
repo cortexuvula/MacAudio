@@ -1,0 +1,8 @@
+#!/bin/bash
+# Pre-install script for MacAudio driver
+# Remove the existing driver for a clean install
+
+echo "Removing existing MacAudioDriver..." >&2
+rm -rf "/Library/Audio/Plug-Ins/HAL/MacAudioDriver.driver" 2>/dev/null
+
+exit 0

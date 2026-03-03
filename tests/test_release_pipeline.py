@@ -3,7 +3,7 @@ Tests for release pipeline artifacts.
 
 Validates file structure, syntax, and content patterns for:
 - .github/workflows/release.yml
-- packaging/scripts/postinstall, preinstall
+- packaging/scripts/app/preinstall, packaging/scripts/driver/preinstall, packaging/scripts/driver/postinstall
 - packaging/resources/uninstall.sh, welcome.html, conclusion.html, license.html
 - packaging/distribution.xml
 """
@@ -118,12 +118,12 @@ class TestReleaseWorkflow(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# postinstall
+# driver/postinstall
 # ---------------------------------------------------------------------------
 class TestPostinstall(unittest.TestCase):
-    """Validate packaging/scripts/postinstall"""
+    """Validate packaging/scripts/driver/postinstall"""
 
-    RELPATH = "packaging/scripts/postinstall"
+    RELPATH = "packaging/scripts/driver/postinstall"
 
     @classmethod
     def setUpClass(cls):
@@ -154,12 +154,51 @@ class TestPostinstall(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# preinstall
+# driver/preinstall
 # ---------------------------------------------------------------------------
-class TestPreinstall(unittest.TestCase):
-    """Validate packaging/scripts/preinstall"""
+class TestDriverPreinstall(unittest.TestCase):
+    """Validate packaging/scripts/driver/preinstall"""
 
-    RELPATH = "packaging/scripts/preinstall"
+    RELPATH = "packaging/scripts/driver/preinstall"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.content = _read(cls.RELPATH)
+
+    def test_shebang(self):
+        self.assertTrue(self.content.startswith("#!/bin/bash"))
+
+    def test_syntax(self):
+        ok, err = _bash_syntax_ok(self.RELPATH)
+        self.assertTrue(ok, f"bash -n failed: {err}")
+
+    def test_executable(self):
+        self.assertTrue(
+            _is_executable(self.RELPATH),
+            "preinstall must have executable permission",
+        )
+
+    def test_stderr_logging(self):
+        self.assertIn(">&2", self.content)
+
+    def test_removes_existing_driver(self):
+        self.assertIn("rm -rf", self.content)
+        self.assertIn("MacAudioDriver.driver", self.content)
+
+    def test_does_not_remove_app(self):
+        self.assertNotIn("/Applications/MacAudio.app", self.content)
+
+    def test_exit_zero(self):
+        self.assertIn("exit 0", self.content)
+
+
+# ---------------------------------------------------------------------------
+# app/preinstall
+# ---------------------------------------------------------------------------
+class TestAppPreinstall(unittest.TestCase):
+    """Validate packaging/scripts/app/preinstall"""
+
+    RELPATH = "packaging/scripts/app/preinstall"
 
     @classmethod
     def setUpClass(cls):
@@ -185,11 +224,8 @@ class TestPreinstall(unittest.TestCase):
         self.assertIn("killall", self.content)
         self.assertIn("MacAudio", self.content)
 
-    def test_removes_existing_driver(self):
-        self.assertIn("rm -rf", self.content)
-        self.assertIn("MacAudioDriver.driver", self.content)
-
     def test_removes_existing_app(self):
+        self.assertIn("rm -rf", self.content)
         self.assertIn("/Applications/MacAudio.app", self.content)
 
     def test_exit_zero(self):

@@ -1,0 +1,14 @@
+#!/bin/bash
+# Pre-install script for MacAudio app
+# Stop the running app so it releases shared memory and the driver
+
+if pgrep -x "MacAudio" > /dev/null 2>&1; then
+    echo "Stopping running MacAudio app..." >&2
+    killall "MacAudio" 2>/dev/null
+    sleep 1
+fi
+
+echo "Removing existing MacAudio.app..." >&2
+rm -rf "/Applications/MacAudio.app" 2>/dev/null
+
+exit 0

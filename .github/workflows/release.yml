@@ -179,10 +179,11 @@ jobs:
           STAGING="$RUNNER_TEMP/pkg_staging"
           mkdir -p "$STAGING"
 
-          # App component package
+          # App component package (with pre-install to stop running app)
           pkgbuild \
             --component build/Release/MacAudio.app \
             --install-location /Applications \
+            --scripts packaging/scripts/app \
             --version "$VERSION" \
             --identifier com.macaudio.app.pkg \
             "$STAGING/MacAudioApp.pkg"
@@ -191,7 +192,7 @@ jobs:
           pkgbuild \
             --component build/Release/MacAudioDriver.driver \
             --install-location "/Library/Audio/Plug-Ins/HAL" \
-            --scripts packaging/scripts \
+            --scripts packaging/scripts/driver \
             --version "$VERSION" \
             --identifier com.macaudio.driver.pkg \
             "$STAGING/MacAudioDriver.pkg"
