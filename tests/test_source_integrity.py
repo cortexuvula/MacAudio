@@ -868,10 +868,10 @@ class TestCaptureStatusIndicator(unittest.TestCase):
                          "stopAudio must set captureStatus to .stopped")
 
     def test_dynamic_menu_bar_icon(self):
-        self.assertIn("speaker.wave.2.fill", self.app_delegate,
-                       "Menu bar must use speaker.wave.2.fill for both-active state")
-        self.assertIn("mic.fill", self.app_delegate,
-                       "Menu bar must use mic.fill for mic-only state")
+        self.assertIn("waveform.circle.fill", self.app_delegate,
+                       "Menu bar must use waveform.circle.fill for both-active state")
+        self.assertIn("mic.circle.fill", self.app_delegate,
+                       "Menu bar must use mic.circle.fill for mic-only state")
 
     def test_menu_shows_capture_status(self):
         self.assertIn("Mic: Capturing", self.app_delegate,

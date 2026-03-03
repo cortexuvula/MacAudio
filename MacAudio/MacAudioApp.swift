@@ -26,7 +26,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
 
         if let button = statusItem?.button {
-            button.image = NSImage(systemSymbolName: "speaker.fill", accessibilityDescription: "MacAudio")
+            button.image = NSImage(systemSymbolName: "waveform.circle", accessibilityDescription: "MacAudio")
         }
 
         buildMenu()
@@ -57,11 +57,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let symbolName: String
         switch appState.captureStatus {
         case .stopped:
-            symbolName = "speaker.fill"
+            symbolName = "waveform.circle"
         case .both:
-            symbolName = "speaker.wave.2.fill"
+            symbolName = "waveform.circle.fill"
         case .micOnly:
-            symbolName = "mic.fill"
+            symbolName = "mic.circle.fill"
         }
         button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "MacAudio")
     }
