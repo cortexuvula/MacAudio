@@ -40,6 +40,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.macaudio.app
         INFOPLIST_FILE: MacAudio/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_OBJC_BRIDGING_HEADER: MacAudio/MacAudioBridgingHeader.h
         CODE_SIGN_ENTITLEMENTS: MacAudio/MacAudio.entitlements
         CODE_SIGN_IDENTITY: "Developer ID Application"
