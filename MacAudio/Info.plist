@@ -13,7 +13,7 @@
     <key>CFBundleDisplayName</key>
     <string>Mac Audio</string>
     <key>CFBundleName</key>
-    <string>$(PRODUCT_NAME)</string>
+    <string>Mac Audio</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
