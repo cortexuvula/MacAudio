@@ -22,6 +22,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let logger = Logger(subsystem: "com.macaudio.app", category: "delegate")
     private var cancellables = Set<AnyCancellable>()
 
+    func applicationWillTerminate(_ notification: Notification) {
+        appState.cleanupForTermination()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
 

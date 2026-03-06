@@ -14,6 +14,8 @@ System (CATapDescription) ┘
 
 The app and driver run in separate processes. The Swift app captures and mixes audio, then writes interleaved Float32 samples to a POSIX shared memory ring buffer. The C driver (an AudioServerPlugin) reads from the same ring buffer and presents the data as a standard macOS input device.
 
+Audio from each source is automatically resampled to 48 kHz before mixing, so devices running at different native sample rates (e.g. a 44.1 kHz USB mic) are handled transparently with no pitch or speed artifacts.
+
 ## Requirements
 
 - macOS 14.2 or later
@@ -104,6 +106,7 @@ MacAudio/
 │   │   ├── AudioMixer.swift           # Orchestrates capture and writes to ring buffer
 │   │   ├── MicCapture.swift           # Mic input via CoreAudio IOProc
 │   │   ├── SystemAudioCapture.swift   # System audio via CATapDescription + aggregate device
+│   │   ├── SampleRateConverter.swift    # AVAudioConverter wrapper for real-time resampling
 │   │   └── SharedRingBufferWriter.swift  # Swift wrapper for the C ring buffer API
 │   ├── Models/
 │   │   ├── AppState.swift             # Observable state for the UI
@@ -129,7 +132,7 @@ MacAudio/
 
 | Constant | Value |
 |---|---|
-| Sample rate | 48000 Hz (also supports 44100, 96000) |
+| Sample rate | 48000 Hz (sources at other rates are resampled automatically) |
 | Channels | 2 (stereo interleaved Float32) |
 | Ring buffer | 16384 frames |
 | Shared memory | `/macaudio_ringbuffer` |

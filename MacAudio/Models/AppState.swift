@@ -56,7 +56,10 @@ final class AppState: ObservableObject {
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.availableMicDevices = devices
-                self.selectedMicDeviceID = defaultDevice
+                if self.selectedMicDeviceID == kAudioObjectUnknown ||
+                   !devices.contains(where: { $0.id == self.selectedMicDeviceID }) {
+                    self.selectedMicDeviceID = defaultDevice
+                }
                 self.driverInstalled = installed
                 self.micPermissionGranted = micAuth
                 self.screenCapturePermissionGranted = screenAuth
@@ -236,9 +239,14 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func stopAudio() {
+    func cleanupForTermination() {
         audioMixer?.stop()
         audioMixer?.destroySharedMemory()
+        audioMixer = nil
+    }
+
+    private func stopAudio() {
+        audioMixer?.stop()
         audioMixer = nil
         isActive = false
         captureStatus = .stopped

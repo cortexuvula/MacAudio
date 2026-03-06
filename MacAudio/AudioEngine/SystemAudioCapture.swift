@@ -8,6 +8,7 @@ final class SystemAudioCapture {
     private var aggregateDeviceID: AudioDeviceID = kAudioObjectUnknown
     private var ioProcID: AudioDeviceIOProcID?
     private var isRunning = false
+    private(set) var sampleRate: Float64 = 0
     private var tapFormat = AudioStreamBasicDescription()
     private let logger = Logger(subsystem: "com.macaudio.app", category: "systap")
 
@@ -85,6 +86,7 @@ final class SystemAudioCapture {
             throw NSError(domain: NSOSStatusErrorDomain, code: Int(status),
                           userInfo: [NSLocalizedDescriptionKey: "Failed to get tap format"])
         }
+        self.sampleRate = tapFormat.mSampleRate
         logger.info("Tap format: \(self.tapFormat.mSampleRate)Hz, \(self.tapFormat.mChannelsPerFrame)ch, \(self.tapFormat.mBitsPerChannel)bit, bpf=\(self.tapFormat.mBytesPerFrame)")
 
         // Step 5: Create IOProc on the aggregate device

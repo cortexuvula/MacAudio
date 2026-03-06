@@ -7,6 +7,7 @@ final class MicCapture {
     private var deviceID: AudioDeviceID = kAudioObjectUnknown
     private var ioProcID: AudioDeviceIOProcID?
     private var isRunning = false
+    private(set) var sampleRate: Float64 = 0
     private let logger = Logger(subsystem: "com.macaudio.app", category: "mic")
 
     /// Callback delivers interleaved Float32 frames at the mic's native sample rate
@@ -30,6 +31,7 @@ final class MicCapture {
 
         // Query the device's native sample rate
         let sampleRate = Self.getDeviceSampleRate(deviceID)
+        self.sampleRate = sampleRate
         logger.info("Mic device ID=\(self.deviceID) sampleRate=\(sampleRate)")
 
         // Create IOProc
