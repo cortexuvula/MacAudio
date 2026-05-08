@@ -155,23 +155,52 @@ final class AppState: ObservableObject {
     }
 
     func toggleAutoStartCapture() {
+        let willEnable = !autoStartCapture
+        if willEnable && !launchAtLogin {
+            // Auto-start requires the app to launch at login. Enable that first.
+            toggleLaunchAtLogin()
+            guard launchAtLogin else { return }
+        }
         autoStartCapture.toggle()
         savePreferences()
     }
 
-    func attemptAutoStart() {
-        guard autoStartCapture else { return }
-        guard driverInstalled else {
-            lastError = "Auto-start failed: audio driver not installed"
-            logger.warning("Auto-start skipped: driver not installed")
+    private static let autoStartMaxRetries = 10
+    private static let autoStartRetryDelay: TimeInterval = 1.0
+
+    func attemptAutoStart(retriesRemaining: Int = AppState.autoStartMaxRetries) {
+        guard autoStartCapture else {
+            logger.notice("Auto-start: skipped (autoStartCapture is off)")
             return
         }
-        guard micPermissionGranted else {
-            lastError = "Auto-start failed: microphone permission not granted"
-            logger.warning("Auto-start skipped: mic permission not granted")
+
+        let driverNow = DriverInstaller.isDriverInstalled()
+        let micNow = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+
+        // Sync UI state with live values so the menu reflects reality.
+        if driverInstalled != driverNow { driverInstalled = driverNow }
+        if micPermissionGranted != micNow { micPermissionGranted = micNow }
+
+        logger.notice("Auto-start: check driver=\(driverNow) mic=\(micNow) retriesLeft=\(retriesRemaining)")
+
+        if !driverNow || !micNow {
+            if retriesRemaining > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.autoStartRetryDelay) { [weak self] in
+                    self?.attemptAutoStart(retriesRemaining: retriesRemaining - 1)
+                }
+                return
+            }
+            if !driverNow {
+                lastError = "Auto-start failed: audio driver not installed"
+                logger.error("Auto-start aborted: driver not installed after retries")
+            } else {
+                lastError = "Auto-start failed: microphone permission not granted"
+                logger.error("Auto-start aborted: mic permission not granted after retries")
+            }
             return
         }
-        logger.info("Auto-starting audio capture")
+
+        logger.notice("Auto-start: starting audio capture")
         startAudio()
     }
 

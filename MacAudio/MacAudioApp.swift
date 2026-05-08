@@ -88,6 +88,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func buildMenu() {
         guard let statusItem else { return }
         let menu = NSMenu()
+        // Honor manual isEnabled assignments (e.g. gating Auto-Start on Launch at Login).
+        menu.autoenablesItems = false
 
         // Start/Stop
         let startStop = NSMenuItem(
