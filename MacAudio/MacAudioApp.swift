@@ -189,7 +189,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
         autoStartItem.target = self
         autoStartItem.state = appState.autoStartCapture ? .on : .off
-        autoStartItem.isEnabled = appState.launchAtLogin
         settingsMenu.addItem(autoStartItem)
 
         let settingsItem = NSMenuItem(title: "Settings", action: nil, keyEquivalent: "")

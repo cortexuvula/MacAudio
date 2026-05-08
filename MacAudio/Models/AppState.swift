@@ -137,32 +137,40 @@ final class AppState: ObservableObject {
 
     func toggleLaunchAtLogin() {
         let service = SMAppService.mainApp
+        let wasEnabled = service.status == .enabled
         do {
-            if service.status == .enabled {
+            if wasEnabled {
                 try service.unregister()
                 launchAtLogin = false
                 autoStartCapture = false
                 savePreferences()
+                logger.notice("Launch at Login: unregistered (auto-start also cleared)")
             } else {
                 try service.register()
                 launchAtLogin = true
+                logger.notice("Launch at Login: registered")
             }
         } catch {
             launchAtLogin = service.status == .enabled
             lastError = "Failed to update login item: \(error.localizedDescription)"
-            logger.error("SMAppService error: \(error.localizedDescription)")
+            logger.error("SMAppService error (wasEnabled=\(wasEnabled)): \(error.localizedDescription)")
         }
     }
 
     func toggleAutoStartCapture() {
         let willEnable = !autoStartCapture
+        logger.notice("Auto-Start Capturing: toggle clicked (willEnable=\(willEnable), launchAtLogin=\(self.launchAtLogin))")
         if willEnable && !launchAtLogin {
             // Auto-start requires the app to launch at login. Enable that first.
             toggleLaunchAtLogin()
-            guard launchAtLogin else { return }
+            guard launchAtLogin else {
+                logger.notice("Auto-Start Capturing: aborted, Launch at Login could not be enabled")
+                return
+            }
         }
         autoStartCapture.toggle()
         savePreferences()
+        logger.notice("Auto-Start Capturing: now \(self.autoStartCapture ? "ON" : "OFF") (saved)")
     }
 
     private static let autoStartMaxRetries = 10
