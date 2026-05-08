@@ -16,7 +16,17 @@ The app and driver run in separate processes. The Swift app captures and mixes a
 
 Audio from each source is automatically resampled to 48 kHz before mixing, so devices running at different native sample rates (e.g. a 44.1 kHz USB mic) are handled transparently with no pitch or speed artifacts.
 
-## Requirements
+## Install
+
+Download the latest signed `.pkg` or `.dmg` from the [Releases page](https://github.com/cortexuvula/MacAudio/releases/latest). The installer places `MacAudio.app` in `/Applications` and the HAL driver in `/Library/Audio/Plug-Ins/HAL/`. After install, launch MacAudio from Applications — it will appear as a menu bar icon.
+
+To verify a download against the published checksums:
+
+```bash
+shasum -a 256 -c MacAudio-<version>-SHA256SUMS.txt
+```
+
+## Build Requirements
 
 - macOS 14.2 or later
 - [Xcode](https://developer.apple.com/xcode/) 16.0+
@@ -89,11 +99,20 @@ system_profiler SPAudioDataType | grep -A5 "MacAudio"
 
 ## Usage
 
-1. Install the driver (see above)
+1. Install the driver (see above) or use the signed installer from [Releases](https://github.com/cortexuvula/MacAudio/releases/latest)
 2. Launch MacAudio — it appears as a menu bar icon
 3. Click the icon and press **Start**
 4. In any recording app, select **MacAudio Virtual Device** as the input device
 5. Use the sliders to adjust mic and system audio levels independently
+
+### Settings
+
+The menu bar icon's **Settings** submenu has two opt-in toggles, both off by default:
+
+- **Launch at Login** — registers the app via `SMAppService` so it starts automatically when you log in.
+- **Auto-Start Capturing** — when launched (at login or otherwise), the app starts capturing immediately if the driver is installed and microphone permission is already granted. Enabling this also enables Launch at Login, since auto-start is only useful when the app is running. Turning Launch at Login off clears Auto-Start Capturing too.
+
+If preconditions aren't met at login (driver missing, mic permission not yet granted), the app retries for ~10 seconds to ride out transient TCC delays before showing an error icon in the menu bar.
 
 ## Project Structure
 
