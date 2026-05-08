@@ -30,7 +30,7 @@ final class MicCapture {
         }
 
         // Query the device's native sample rate
-        let sampleRate = Self.getDeviceSampleRate(deviceID)
+        let sampleRate = try Self.getDeviceSampleRate(deviceID)
         self.sampleRate = sampleRate
         logger.info("Mic device ID=\(self.deviceID) sampleRate=\(sampleRate)")
 
@@ -106,7 +106,7 @@ final class MicCapture {
         return deviceID
     }
 
-    private static func getDeviceSampleRate(_ deviceID: AudioDeviceID) -> Float64 {
+    private static func getDeviceSampleRate(_ deviceID: AudioDeviceID) throws -> Float64 {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyNominalSampleRate,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -114,7 +114,12 @@ final class MicCapture {
         )
         var sampleRate: Float64 = 0
         var size = UInt32(MemoryLayout<Float64>.size)
-        AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &sampleRate)
+        let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &sampleRate)
+        guard status == noErr, sampleRate > 0 else {
+            throw NSError(domain: "MacAudio", code: Int(status),
+                          userInfo: [NSLocalizedDescriptionKey:
+                                     "Could not query mic sample rate (status: \(status))"])
+        }
         return sampleRate
     }
 

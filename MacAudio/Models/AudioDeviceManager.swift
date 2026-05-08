@@ -122,30 +122,29 @@ final class AudioDeviceManager {
     }
 
     private static func getDeviceName(_ deviceID: AudioDeviceID) -> String {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioObjectPropertyName,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var name: CFString = "" as CFString
-        var dataSize = UInt32(MemoryLayout<CFString>.size)
-        let status = AudioObjectGetPropertyData(
-            deviceID, &address, 0, nil, &dataSize, &name
-        )
-        return status == noErr ? (name as String) : "Unknown Device"
+        return readCFStringProperty(deviceID, selector: kAudioObjectPropertyName) ?? "Unknown Device"
     }
 
     private static func getDeviceUID(_ deviceID: AudioDeviceID) -> String {
+        return readCFStringProperty(deviceID, selector: kAudioDevicePropertyDeviceUID) ?? ""
+    }
+
+    /// Reads a CFString property from a Core Audio object and consumes its +1 retain.
+    /// Using `Unmanaged<CFString>?` (instead of a typed `CFString` local) keeps Swift's
+    /// reference-counting out of the path; we explicitly consume the retain.
+    private static func readCFStringProperty(_ objectID: AudioObjectID,
+                                             selector: AudioObjectPropertySelector) -> String? {
         var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyDeviceUID,
+            mSelector: selector,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        var uid: CFString = "" as CFString
-        var dataSize = UInt32(MemoryLayout<CFString>.size)
+        var unmanaged: Unmanaged<CFString>?
+        var dataSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
         let status = AudioObjectGetPropertyData(
-            deviceID, &address, 0, nil, &dataSize, &uid
+            objectID, &address, 0, nil, &dataSize, &unmanaged
         )
-        return status == noErr ? (uid as String) : ""
+        guard status == noErr, let value = unmanaged else { return nil }
+        return value.takeRetainedValue() as String
     }
 }

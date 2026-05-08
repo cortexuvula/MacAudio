@@ -6,7 +6,7 @@ final class SampleRateConverter {
     private let inputFormat: AVAudioFormat
     private let outputFormat: AVAudioFormat
     private var inputPCMBuffer: AVAudioPCMBuffer
-    private let outputPCMBuffer: AVAudioPCMBuffer
+    private var outputPCMBuffer: AVAudioPCMBuffer
     private let logger = Logger(subsystem: "com.macaudio.app", category: "src")
 
     /// Returns nil if sourceRate == destRate (no conversion needed).
@@ -51,7 +51,10 @@ final class SampleRateConverter {
     func convert(_ input: UnsafePointer<Float>, frameCount: UInt32) -> (UnsafePointer<Float>, UInt32)? {
         let channels = inputFormat.channelCount
 
-        // Reallocate input buffer if needed (rare)
+        // Reallocate input/output buffers if needed (rare).
+        // Both must be stored on self: the returned pointer aliases outputPCMBuffer's
+        // storage and is consumed by the caller after this function returns, so the
+        // buffer must outlive the call.
         if frameCount > inputPCMBuffer.frameCapacity {
             let ratio = outputFormat.sampleRate / inputFormat.sampleRate
             let newOutCapacity = AVAudioFrameCount(ceil(Double(frameCount) * ratio)) + 1
@@ -60,9 +63,8 @@ final class SampleRateConverter {
                 return nil
             }
             inputPCMBuffer = newInBuf
-            // Can't reassign let, so we handle this differently
+            outputPCMBuffer = newOutBuf
             logger.warning("SRC: input exceeded maxFrames (\(frameCount)), reallocating")
-            return convertWithBuffers(input, frameCount: frameCount, inBuf: newInBuf, outBuf: newOutBuf)
         }
 
         return convertWithBuffers(input, frameCount: frameCount, inBuf: inputPCMBuffer, outBuf: outputPCMBuffer)

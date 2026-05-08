@@ -41,7 +41,13 @@ final class AppState: ObservableObject {
     private static let micVolumeKey = "micVolume"
     private static let systemVolumeKey = "systemVolume"
     private static let selectedMicDeviceIDKey = "selectedMicDeviceID"
+    private static let selectedMicDeviceUIDKey = "selectedMicDeviceUID"
     private static let autoStartCaptureKey = "autoStartCapture"
+
+    /// Preferred mic identified by stable UID. AudioDeviceID is a per-boot
+    /// numeric handle; UID survives unplug/replug and reboots, so we prefer it
+    /// when matching saved selection against the live device list.
+    private var preferredMicUID: String?
 
     init() {
         loadPreferences()
@@ -56,10 +62,7 @@ final class AppState: ObservableObject {
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.availableMicDevices = devices
-                if self.selectedMicDeviceID == kAudioObjectUnknown ||
-                   !devices.contains(where: { $0.id == self.selectedMicDeviceID }) {
-                    self.selectedMicDeviceID = defaultDevice
-                }
+                self.selectedMicDeviceID = self.resolveMicSelection(in: devices, fallback: defaultDevice)
                 self.driverInstalled = installed
                 self.micPermissionGranted = micAuth
                 self.screenCapturePermissionGranted = screenAuth
@@ -100,8 +103,27 @@ final class AppState: ObservableObject {
 
     func updateMicDevice(_ deviceID: AudioDeviceID) {
         selectedMicDeviceID = deviceID
+        // Remember by UID so a brief unplug doesn't lose the user's preference.
+        preferredMicUID = availableMicDevices.first(where: { $0.id == deviceID })?.uid
         audioMixer?.setMicDevice(deviceID)
         savePreferences()
+    }
+
+    /// Picks the best `AudioDeviceID` for the user's saved mic preference,
+    /// preferring UID match over numeric ID. Returns `fallback` if nothing matches.
+    private func resolveMicSelection(in devices: [AudioDevice],
+                                     fallback: AudioDeviceID) -> AudioDeviceID {
+        if let uid = preferredMicUID,
+           let match = devices.first(where: { $0.uid == uid }) {
+            return match.id
+        }
+        if selectedMicDeviceID != kAudioObjectUnknown,
+           let match = devices.first(where: { $0.id == selectedMicDeviceID }) {
+            // Cache the UID so future refreshes survive an unplug.
+            preferredMicUID = match.uid
+            return match.id
+        }
+        return fallback
     }
 
     func installDriver() {
@@ -127,10 +149,7 @@ final class AppState: ObservableObject {
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.availableMicDevices = devices
-                if self.selectedMicDeviceID == kAudioObjectUnknown ||
-                   !devices.contains(where: { $0.id == self.selectedMicDeviceID }) {
-                    self.selectedMicDeviceID = defaultDevice
-                }
+                self.selectedMicDeviceID = self.resolveMicSelection(in: devices, fallback: defaultDevice)
             }
         }
     }
@@ -164,6 +183,9 @@ final class AppState: ObservableObject {
             // Auto-start requires the app to launch at login. Enable that first.
             toggleLaunchAtLogin()
             guard launchAtLogin else {
+                if lastError == nil {
+                    lastError = "Approve MacAudio in System Settings → General → Login Items, then try again."
+                }
                 logger.notice("Auto-Start Capturing: aborted, Launch at Login could not be enabled")
                 return
             }
@@ -212,13 +234,15 @@ final class AppState: ObservableObject {
         startAudio()
     }
 
-    func requestMicPermission() {
+    func requestMicPermission(thenStart: Bool = false) {
         Task {
             let granted = await AVCaptureDevice.requestAccess(for: .audio)
             await MainActor.run {
                 self.micPermissionGranted = granted
                 if !granted {
                     self.lastError = "Microphone access denied — grant in System Settings > Privacy > Microphone"
+                } else if thenStart {
+                    self.startAudio()
                 }
             }
         }
@@ -232,8 +256,23 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Re-reads current TCC state for mic and screen capture. Call when the app
+    /// becomes active so the menu reflects changes the user just made in
+    /// System Settings without restarting MacAudio.
+    func refreshPermissionState() {
+        let micAuth = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        let screenAuth = CGPreflightScreenCaptureAccess()
+        if micPermissionGranted != micAuth { micPermissionGranted = micAuth }
+        if screenCapturePermissionGranted != screenAuth { screenCapturePermissionGranted = screenAuth }
+    }
+
     private func startAudio() {
-        logger.info("startAudio called, driverInstalled=\(self.driverInstalled)")
+        logger.info("startAudio called, driverInstalled=\(self.driverInstalled), isActive=\(self.isActive)")
+
+        guard !isActive else {
+            logger.info("startAudio: already active, ignoring")
+            return
+        }
 
         guard driverInstalled else {
             lastError = "Please install the audio driver first"
@@ -243,7 +282,9 @@ final class AppState: ObservableObject {
         }
 
         if !micPermissionGranted {
-            requestMicPermission()
+            // Defer start until permission is granted; the request callback re-enters startAudio.
+            requestMicPermission(thenStart: true)
+            return
         }
 
         if !screenCapturePermissionGranted {
@@ -295,6 +336,9 @@ final class AppState: ObservableObject {
         UserDefaults.standard.set(micVolume, forKey: Self.micVolumeKey)
         UserDefaults.standard.set(systemVolume, forKey: Self.systemVolumeKey)
         UserDefaults.standard.set(selectedMicDeviceID, forKey: Self.selectedMicDeviceIDKey)
+        if let uid = preferredMicUID {
+            UserDefaults.standard.set(uid, forKey: Self.selectedMicDeviceUIDKey)
+        }
         UserDefaults.standard.set(autoStartCapture, forKey: Self.autoStartCaptureKey)
     }
 
@@ -309,6 +353,7 @@ final class AppState: ObservableObject {
         if savedDeviceID != 0 {
             selectedMicDeviceID = AudioDeviceID(savedDeviceID)
         }
+        preferredMicUID = UserDefaults.standard.string(forKey: Self.selectedMicDeviceUIDKey)
         autoStartCapture = UserDefaults.standard.bool(forKey: Self.autoStartCaptureKey)
     }
 }

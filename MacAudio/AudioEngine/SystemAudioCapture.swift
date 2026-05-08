@@ -163,11 +163,11 @@ final class SystemAudioCapture {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        var uid: CFString = "" as CFString
-        var uidSize = UInt32(MemoryLayout<CFString>.size)
+        var uid: Unmanaged<CFString>?
+        var uidSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
         let uidStatus = AudioObjectGetPropertyData(deviceID, &uidAddress, 0, nil, &uidSize, &uid)
-        guard uidStatus == noErr else { return nil }
-        return uid as String
+        guard uidStatus == noErr, let value = uid else { return nil }
+        return value.takeRetainedValue() as String
     }
 
     deinit {

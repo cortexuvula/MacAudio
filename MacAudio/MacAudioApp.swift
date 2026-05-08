@@ -16,7 +16,7 @@ struct MacAudioApp: App {
 }
 
 @MainActor
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private let appState = AppState()
     private let logger = Logger(subsystem: "com.macaudio.app", category: "delegate")
@@ -85,9 +85,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "MacAudio")
     }
 
+    nonisolated func menuWillOpen(_ menu: NSMenu) {
+        // User may have flipped mic or screen-recording permission in System
+        // Settings between menu opens; sync the UI before they see it.
+        Task { @MainActor [weak self] in
+            self?.appState.refreshPermissionState()
+        }
+    }
+
     private func buildMenu() {
         guard let statusItem else { return }
         let menu = NSMenu()
+        menu.delegate = self
         // Honor manual isEnabled assignments (e.g. gating Auto-Start on Launch at Login).
         menu.autoenablesItems = false
 

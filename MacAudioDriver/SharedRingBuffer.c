@@ -26,11 +26,12 @@ uint64_t SharedRingBuffer_GetSHMSize(void) {
 }
 
 SharedRingBuffer* SharedRingBuffer_CreateOrOpen(int forWriting) {
-    if (forWriting) {
-        // Remove stale shm from previous sessions, then create fresh.
-        // The driver re-opens in StartIO so it will pick up the new segment.
-        shm_unlink(kSHM_Name);
-    }
+    // Important: do NOT shm_unlink on writer open. If the driver already has
+    // this segment mmap'd from a previous Start cycle and a recording client
+    // is still streaming, unlink+recreate would leave the driver's mmap
+    // pointing at an orphan inode while the writer fills a fresh one — the
+    // driver would output silence indefinitely. Reusing the existing segment
+    // keeps reader and writer pointing at the same memory across Stop→Start.
 
     int flags = forWriting ? (O_CREAT | O_RDWR) : O_RDWR;
     int fd = shm_open(kSHM_Name, flags, 0666);
@@ -40,10 +41,17 @@ SharedRingBuffer* SharedRingBuffer_CreateOrOpen(int forWriting) {
     }
 
     if (forWriting) {
-        if (ftruncate(fd, (off_t)kSHMSize) != 0) {
-            perror("ftruncate");
-            close(fd);
-            return NULL;
+        // Make sure the segment is the expected size. ftruncate to the same
+        // size is a no-op; growing a 0-byte newly-created segment is the
+        // typical case. Shrinking (size mismatch from older driver) is
+        // destructive but acceptable on a writer-side reset.
+        struct stat st;
+        if (fstat(fd, &st) != 0 || st.st_size != (off_t)kSHMSize) {
+            if (ftruncate(fd, (off_t)kSHMSize) != 0) {
+                perror("ftruncate");
+                close(fd);
+                return NULL;
+            }
         }
     }
 
@@ -58,11 +66,17 @@ SharedRingBuffer* SharedRingBuffer_CreateOrOpen(int forWriting) {
     }
 
     if (forWriting) {
-        memset(rb->buffer, 0, sizeof(rb->buffer));
+        // Force inactive while we reset state so any in-flight reader bails
+        // to silence (driver checks `active` every IO cycle). Caller will
+        // SetActive(1) once it's ready to push audio.
+        atomic_store_explicit(&rb->active, 0, memory_order_release);
+        // Reset heads. Without this, leftover offsets from a prior session
+        // can make available = writeHead - readHead look enormous and the
+        // reader will memcpy garbage from the buffer.
         atomic_store_explicit(&rb->writeHeadFrames, 0, memory_order_release);
         atomic_store_explicit(&rb->readHeadFrames, 0, memory_order_release);
         atomic_store_explicit(&rb->sampleRate, 48000, memory_order_release);
-        atomic_store_explicit(&rb->active, 0, memory_order_release);
+        memset(rb->buffer, 0, sizeof(rb->buffer));
     }
 
     return rb;
@@ -97,6 +111,20 @@ void SharedRingBuffer_Write(SharedRingBuffer* rb, const float* frames, uint32_t 
     if (!rb || !frames || frameCount == 0) return;
 
     uint64_t writeHead = atomic_load_explicit(&rb->writeHeadFrames, memory_order_acquire);
+    uint64_t readHead  = atomic_load_explicit(&rb->readHeadFrames,  memory_order_acquire);
+
+    // If the reader has fallen far enough behind that this write would overrun
+    // unread data, drop the oldest by advancing readHead. This keeps the buffer
+    // bounded and guarantees the reader will not see torn data mid-memcpy.
+    // (Reader stalls happen on driver glitches; preferring to drop oldest keeps
+    // the live audio path latency-bounded.)
+    uint64_t inUse = writeHead - readHead;
+    if (inUse + frameCount > kRingBufferFrames) {
+        uint64_t needToAdvance = inUse + frameCount - kRingBufferFrames;
+        atomic_store_explicit(&rb->readHeadFrames,
+                              readHead + needToAdvance, memory_order_release);
+    }
+
     uint32_t offset = (uint32_t)(writeHead & (kRingBufferFrames - 1));
     uint32_t remaining = frameCount;
     uint32_t srcOffset = 0;

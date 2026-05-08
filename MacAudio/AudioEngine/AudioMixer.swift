@@ -41,22 +41,27 @@ final class AudioMixer {
         try ringBufferWriter.open()
         logger.info("Shared ring buffer opened")
 
-        // Set up mic capture
-        if let deviceID = micDeviceID {
-            micCapture.setInputDevice(deviceID)
-        }
-        micCapture.onAudioReceived = { [weak self] floatPtr, frameCount, channelCount in
-            self?.handleMicAudio(floatPtr, frameCount: frameCount, channelCount: Int(channelCount))
-        }
+        // From here on, any failure must close the ring buffer so we don't leak
+        // the SHM mapping or leave the writer half-open.
+        var didStartMic = false
+        do {
+            // Set up mic capture
+            if let deviceID = micDeviceID {
+                micCapture.setInputDevice(deviceID)
+            }
+            micCapture.onAudioReceived = { [weak self] floatPtr, frameCount, channelCount in
+                self?.handleMicAudio(floatPtr, frameCount: frameCount, channelCount: Int(channelCount))
+            }
 
-        // Set up system audio capture
-        systemCapture.onAudioReceived = { [weak self] bufferList, frameCount in
-            self?.handleSystemAudio(bufferList, frameCount: frameCount)
-        }
+            // Set up system audio capture
+            systemCapture.onAudioReceived = { [weak self] bufferList, frameCount in
+                self?.handleSystemAudio(bufferList, frameCount: frameCount)
+            }
 
-        // Start captures
-        try micCapture.start()
-        logger.info("Mic capture started")
+            // Start captures
+            try micCapture.start()
+            didStartMic = true
+            logger.info("Mic capture started")
 
         // Create mic sample rate converter if needed
         let destRate = AudioConstants.defaultSampleRate
@@ -88,7 +93,13 @@ final class AudioMixer {
             // Continue with mic only
         }
 
-        isRunning = true
+            isRunning = true
+        } catch {
+            logger.error("AudioMixer.start failed: \(error.localizedDescription)")
+            if didStartMic { micCapture.stop() }
+            ringBufferWriter.close()
+            throw error
+        }
     }
 
     func stop() {

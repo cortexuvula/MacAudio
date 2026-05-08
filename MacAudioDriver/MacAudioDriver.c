@@ -70,6 +70,11 @@ static AudioServerPlugInDriverRef gDriverRef = &gDriverInterfacePtr;
 
 static AudioServerPlugInHostRef  gHost = NULL;
 static _Atomic(SharedRingBuffer*) gRingBuffer = NULL;
+// Pointer kept alive past StopIO so any DoIOOperation that already loaded the
+// previous gRingBuffer can finish without dereferencing freed memory. Closed
+// at the next StartIO under gDevice_IOMutex, by which time the HAL guarantees
+// all IO cycles for the prior session have ended.
+static SharedRingBuffer*         gRingBuffer_PendingClose = NULL;
 static Float64                   gDevice_SampleRate = kDevice_DefaultSampleRate;
 static UInt32                    gDevice_IOClientCount = 0;
 static bool                      gDevice_IOIsRunning = false;
@@ -1072,7 +1077,15 @@ static OSStatus MacAudio_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjec
         atomic_store_explicit(&gDevice_AnchorHostTime, mach_absolute_time(), memory_order_release);
         gDevice_TimeStampCounter = 0;
 
-        // Always re-open to pick up the latest shm segment
+        // Reap the deferred close from the previous StopIO. Safe here because
+        // we're under gDevice_IOMutex and the prior IO cycles have ended (HAL
+        // guarantees this between StopIO and StartIO).
+        if (gRingBuffer_PendingClose) {
+            SharedRingBuffer_Close(gRingBuffer_PendingClose);
+            gRingBuffer_PendingClose = NULL;
+        }
+
+        // Re-open the shm segment for this fresh IO cycle.
         SharedRingBuffer* oldRb = atomic_load_explicit(&gRingBuffer, memory_order_acquire);
         if (oldRb) {
             SharedRingBuffer_Close(oldRb);
@@ -1102,10 +1115,20 @@ static OSStatus MacAudio_StopIO(AudioServerPlugInDriverRef inDriver, AudioObject
     }
     if (gDevice_IOClientCount == 0) {
         gDevice_IOIsRunning = false;
-        SharedRingBuffer* oldRb = atomic_load_explicit(&gRingBuffer, memory_order_acquire);
+        // Detach the buffer atomically, but defer the actual munmap to the
+        // next StartIO. Any DoIOOperation racing with this StopIO may have
+        // already loaded gRingBuffer; munmap'ing now would risk SIGBUS in
+        // coreaudiod. The HAL guarantees no new IO cycles will fire on this
+        // device until the next StartIO, where it's safe to finish the close.
+        SharedRingBuffer* oldRb = atomic_exchange_explicit(&gRingBuffer, NULL, memory_order_acq_rel);
         if (oldRb) {
-            SharedRingBuffer_Close(oldRb);
-            atomic_store_explicit(&gRingBuffer, NULL, memory_order_release);
+            // If a previous deferred close hasn't been reaped yet (shouldn't
+            // happen — Start always reaps before this point), reap it now to
+            // avoid leaking.
+            if (gRingBuffer_PendingClose) {
+                SharedRingBuffer_Close(gRingBuffer_PendingClose);
+            }
+            gRingBuffer_PendingClose = oldRb;
         }
     }
 
