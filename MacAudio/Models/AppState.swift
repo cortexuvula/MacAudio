@@ -365,11 +365,7 @@ final class AppState: ObservableObject {
             selectedMicDeviceID = AudioDeviceID(savedDeviceID)
         }
         preferredMicUID = UserDefaults.standard.string(forKey: Self.selectedMicDeviceUIDKey)
-        // Guard like the other prefs: at login, cfprefsd may not yet have loaded
-        // our domain, in which case .bool returns false unconditionally and
-        // overwrites the saved-true value. Only assign when the key truly exists.
-        if UserDefaults.standard.object(forKey: Self.autoStartCaptureKey) != nil {
-            autoStartCapture = UserDefaults.standard.bool(forKey: Self.autoStartCaptureKey)
-        }
+        autoStartCapture = UserDefaults.standard.boolIfPresent(
+            forKey: Self.autoStartCaptureKey, default: autoStartCapture)
     }
 }

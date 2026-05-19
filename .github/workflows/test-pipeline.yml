@@ -6,9 +6,11 @@ on:
       - '.github/workflows/release.yml'
       - 'packaging/**'
       - 'tests/**'
+      - 'MacAudioTests/**'
       - 'MacAudioDriver/**'
       - 'MacAudio/AudioEngine/**'
       - 'MacAudio/Models/**'
+      - 'MacAudio/Utilities/**'
       - 'MacAudio/MacAudio.entitlements'
       - 'project.yml'
   push:
@@ -17,9 +19,11 @@ on:
       - '.github/workflows/release.yml'
       - 'packaging/**'
       - 'tests/**'
+      - 'MacAudioTests/**'
       - 'MacAudioDriver/**'
       - 'MacAudio/AudioEngine/**'
       - 'MacAudio/Models/**'
+      - 'MacAudio/Utilities/**'
       - 'MacAudio/MacAudio.entitlements'
       - 'project.yml'
 
@@ -60,3 +64,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: python3 -m unittest tests.test_source_integrity -v
+
+  test-swift:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install xcodegen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Restore entitlements
+        run: |
+          cat > MacAudio/MacAudio.entitlements << 'ENTITLEMENTS'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>com.apple.security.device.audio-input</key>
+              <true/>
+          </dict>
+          </plist>
+          ENTITLEMENTS
+      - name: Restore driver Info.plist CFBundleExecutable
+        run: |
+          /usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string '\$(EXECUTABLE_NAME)'" \
+            MacAudioDriver/Info.plist 2>/dev/null || \
+          /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable '\$(EXECUTABLE_NAME)'" \
+            MacAudioDriver/Info.plist
+      - name: Run Swift unit tests
+        run: |
+          xcodebuild test \
+            -project MacAudio.xcodeproj \
+            -scheme MacAudio \
+            -destination 'platform=macOS' \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGN_STYLE=Automatic \
+            DEVELOPMENT_TEAM="" \
+            ENABLE_HARDENED_RUNTIME=NO

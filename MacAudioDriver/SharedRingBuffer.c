@@ -42,16 +42,22 @@ SharedRingBuffer* SharedRingBuffer_CreateOrOpen(int forWriting) {
 
     if (forWriting) {
         struct stat st;
-        if (fstat(fd, &st) != 0 || st.st_size != (off_t)kSHMSize) {
+        // Use `<` not `!=`: macOS rounds POSIX shm segments up to a page
+        // boundary, so st.st_size is typically larger than kSHMSize even
+        // on a freshly-ftruncate'd segment. Comparing for inequality
+        // would force a unnecessary shm_unlink + recreate on every
+        // writer-open. We only need to recover when the segment is too
+        // small to mmap kSHMSize bytes from.
+        if (fstat(fd, &st) != 0 || st.st_size < (off_t)kSHMSize) {
             // macOS POSIX shm fixes a segment's size on first ftruncate;
             // any later ftruncate (even from a fresh fd, even after the
-            // creator exits) returns EINVAL. So a stale segment at the
-            // wrong size — left over from an older build with a different
-            // kSHMSize, or created at 0 bytes by an external tool — is
-            // unrecoverable except via shm_unlink + recreate. This
-            // overrides the "don't unlink" guidance above for the
-            // size-mismatch case: a driver still mmap'd to a wrong-sized
-            // segment is already broken.
+            // creator exits) returns EINVAL. So a too-small segment —
+            // left over from an older build with a smaller kSHMSize, or
+            // created at 0 bytes by an external tool — is unrecoverable
+            // except via shm_unlink + recreate. This overrides the
+            // "don't unlink" guidance above for the size-mismatch case:
+            // a driver still mmap'd to a too-small segment is already
+            // broken.
             close(fd);
             shm_unlink(kSHM_Name);
             fd = shm_open(kSHM_Name, O_CREAT | O_RDWR, 0666);

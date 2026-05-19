@@ -16,6 +16,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "SharedRingBuffer.h"
 
 static int tests_run = 0;
@@ -408,6 +412,120 @@ static void test_null_read(void) {
     assert(SharedRingBuffer_GetReadHead(NULL) == 0);
 }
 
+/* ---------- shm size-mismatch recovery (regression for v0.6.5) ---------- */
+
+/* macOS POSIX shm fixes a segment's size on first ftruncate; subsequent
+ * ftruncate calls return EINVAL. A pre-existing segment at the wrong size
+ * (left over from an older build with a different kSHMSize, or created at
+ * 0 bytes by an external tool) is therefore unrecoverable except via
+ * shm_unlink + recreate. These tests pre-create a wrong-sized segment and
+ * assert that the writer-open path recovers it.
+ */
+
+/* Returns the current size of the segment by opening read-only and fstat'ing.
+ * Returns -1 on error. */
+static off_t shm_current_size(void) {
+    int fd = shm_open(kSHM_Name, O_RDWR, 0);
+    if (fd < 0) return -1;
+    struct stat st;
+    int rc = fstat(fd, &st);
+    close(fd);
+    return rc == 0 ? st.st_size : -1;
+}
+
+static void test_recovers_from_zero_sized_shm_segment(void) {
+    /* Start clean. */
+    shm_unlink(kSHM_Name);
+
+    /* Pre-create the segment at size 0 (mirrors what an external probe
+     * with shm_open + close would leave behind). */
+    int fd = shm_open(kSHM_Name, O_CREAT | O_EXCL | O_RDWR, 0666);
+    assert(fd >= 0);
+    close(fd);
+    assert(shm_current_size() == 0);
+
+    /* Writer-open must recover. macOS rounds shm segments up to a page
+     * boundary, so st_size is typically larger than kSHMSize even right
+     * after ftruncate; check `>=` rather than equality. */
+    SharedRingBuffer* w = SharedRingBuffer_CreateOrOpen(1);
+    assert(w != NULL);
+    assert(shm_current_size() >= (off_t)SharedRingBuffer_GetSHMSize());
+
+    /* And the recovered segment must be functional end-to-end. */
+    SharedRingBuffer* r = SharedRingBuffer_CreateOrOpen(0);
+    assert(r != NULL);
+    float src[4] = {0.25f, -0.5f, 0.75f, -0.125f};
+    SharedRingBuffer_Write(w, src, 2);
+    float dst[4] = {0};
+    uint64_t read = SharedRingBuffer_Read(r, dst, 2);
+    assert(read == 2);
+    for (int i = 0; i < 4; i++) assert(fabsf(dst[i] - src[i]) < 1e-6f);
+
+    SharedRingBuffer_Close(r);
+    SharedRingBuffer_Close(w);
+    SharedRingBuffer_Destroy();
+}
+
+static void test_recovers_from_wrong_nonzero_sized_shm_segment(void) {
+    /* Simulates a stale segment from an older build whose kSHMSize was
+     * different — the segment exists at some non-zero size that doesn't
+     * match the current build. ftruncate on this segment is locked
+     * (macOS one-shot-size); recovery requires shm_unlink + recreate. */
+    shm_unlink(kSHM_Name);
+
+    int fd = shm_open(kSHM_Name, O_CREAT | O_EXCL | O_RDWR, 0666);
+    assert(fd >= 0);
+    /* Pick a wrong size that's smaller than kSHMSize. macOS rounds shm
+     * sizes up to a page boundary, so the actual stored size may exceed
+     * our ftruncate request — we only assert that it lands somewhere
+     * below kSHMSize, which is what triggers the library's recovery. */
+    const off_t wrong_size = 4096;
+    assert(wrong_size < (off_t)SharedRingBuffer_GetSHMSize());
+    assert(ftruncate(fd, wrong_size) == 0);
+    close(fd);
+    assert(shm_current_size() < (off_t)SharedRingBuffer_GetSHMSize());
+
+    SharedRingBuffer* w = SharedRingBuffer_CreateOrOpen(1);
+    assert(w != NULL);
+    assert(shm_current_size() >= (off_t)SharedRingBuffer_GetSHMSize());
+
+    SharedRingBuffer_Close(w);
+    SharedRingBuffer_Destroy();
+}
+
+/* Writer-open on an already-correctly-sized segment must NOT trigger
+ * recovery (no unnecessary shm_unlink + recreate). Macros rounds shm
+ * segments up to a page boundary, so a naive `!= kSHMSize` check would
+ * force recovery on every open and break the driver-mmap-preservation
+ * intent. We verify by checking the inode is stable across opens. */
+static void test_no_recovery_when_segment_already_correct_size(void) {
+    shm_unlink(kSHM_Name);
+
+    /* First writer-open establishes the segment at the right size. */
+    SharedRingBuffer* w1 = SharedRingBuffer_CreateOrOpen(1);
+    assert(w1 != NULL);
+    int fd1 = shm_open(kSHM_Name, O_RDWR, 0);
+    assert(fd1 >= 0);
+    struct stat before;
+    assert(fstat(fd1, &before) == 0);
+    close(fd1);
+    SharedRingBuffer_Close(w1);
+
+    /* Second writer-open must reuse the same kernel object — same inode. */
+    SharedRingBuffer* w2 = SharedRingBuffer_CreateOrOpen(1);
+    assert(w2 != NULL);
+    int fd2 = shm_open(kSHM_Name, O_RDWR, 0);
+    assert(fd2 >= 0);
+    struct stat after;
+    assert(fstat(fd2, &after) == 0);
+    close(fd2);
+
+    assert(before.st_ino == after.st_ino);
+
+    SharedRingBuffer_Close(w2);
+    SharedRingBuffer_Destroy();
+}
+
 /* ---------- Writer + Reader Simulation ---------- */
 
 static void test_writer_reader_interleaved(void) {
@@ -483,6 +601,11 @@ int main(void) {
     printf("\nNULL Safety:\n");
     RUN_TEST(test_null_write);
     RUN_TEST(test_null_read);
+
+    printf("\nshm size-mismatch recovery (regression v0.6.5):\n");
+    RUN_TEST(test_recovers_from_zero_sized_shm_segment);
+    RUN_TEST(test_recovers_from_wrong_nonzero_sized_shm_segment);
+    RUN_TEST(test_no_recovery_when_segment_already_correct_size);
 
     printf("\nWriter + Reader Simulation:\n");
     RUN_TEST(test_writer_reader_interleaved);
