@@ -41,12 +41,24 @@ SharedRingBuffer* SharedRingBuffer_CreateOrOpen(int forWriting) {
     }
 
     if (forWriting) {
-        // Make sure the segment is the expected size. ftruncate to the same
-        // size is a no-op; growing a 0-byte newly-created segment is the
-        // typical case. Shrinking (size mismatch from older driver) is
-        // destructive but acceptable on a writer-side reset.
         struct stat st;
         if (fstat(fd, &st) != 0 || st.st_size != (off_t)kSHMSize) {
+            // macOS POSIX shm fixes a segment's size on first ftruncate;
+            // any later ftruncate (even from a fresh fd, even after the
+            // creator exits) returns EINVAL. So a stale segment at the
+            // wrong size — left over from an older build with a different
+            // kSHMSize, or created at 0 bytes by an external tool — is
+            // unrecoverable except via shm_unlink + recreate. This
+            // overrides the "don't unlink" guidance above for the
+            // size-mismatch case: a driver still mmap'd to a wrong-sized
+            // segment is already broken.
+            close(fd);
+            shm_unlink(kSHM_Name);
+            fd = shm_open(kSHM_Name, O_CREAT | O_RDWR, 0666);
+            if (fd < 0) {
+                perror("shm_open");
+                return NULL;
+            }
             if (ftruncate(fd, (off_t)kSHMSize) != 0) {
                 perror("ftruncate");
                 close(fd);
