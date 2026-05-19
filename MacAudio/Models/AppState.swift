@@ -199,6 +199,17 @@ final class AppState: ObservableObject {
     private static let autoStartRetryDelay: TimeInterval = 1.0
 
     func attemptAutoStart(retriesRemaining: Int = AppState.autoStartMaxRetries) {
+        // cfprefsd may have been slow at init, leaving the in-memory pref stale
+        // (defaulted to false even though the user had it on). By the time
+        // auto-start fires, cfprefsd is reliably available — re-read and resync.
+        if UserDefaults.standard.object(forKey: Self.autoStartCaptureKey) != nil {
+            let liveValue = UserDefaults.standard.bool(forKey: Self.autoStartCaptureKey)
+            if autoStartCapture != liveValue {
+                logger.notice("Auto-start: pref refreshed from disk (in-memory=\(self.autoStartCapture) → live=\(liveValue))")
+                autoStartCapture = liveValue
+            }
+        }
+
         guard autoStartCapture else {
             logger.notice("Auto-start: skipped (autoStartCapture is off)")
             return
@@ -354,6 +365,11 @@ final class AppState: ObservableObject {
             selectedMicDeviceID = AudioDeviceID(savedDeviceID)
         }
         preferredMicUID = UserDefaults.standard.string(forKey: Self.selectedMicDeviceUIDKey)
-        autoStartCapture = UserDefaults.standard.bool(forKey: Self.autoStartCaptureKey)
+        // Guard like the other prefs: at login, cfprefsd may not yet have loaded
+        // our domain, in which case .bool returns false unconditionally and
+        // overwrites the saved-true value. Only assign when the key truly exists.
+        if UserDefaults.standard.object(forKey: Self.autoStartCaptureKey) != nil {
+            autoStartCapture = UserDefaults.standard.bool(forKey: Self.autoStartCaptureKey)
+        }
     }
 }
