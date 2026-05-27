@@ -197,6 +197,20 @@ final class AppState: ObservableObject {
 
     private static let autoStartMaxRetries = 10
     private static let autoStartRetryDelay: TimeInterval = 1.0
+    private static let autoStartPrefRetryDelay: TimeInterval = 2.0
+
+    /// Reads the `autoStartCapture` value directly from the on-disk plist,
+    /// bypassing the cfprefsd XPC channel. This is the last-resort fallback
+    /// when the app launches at login and cfprefsd hasn't loaded the app's
+    /// preference domain into its cache yet — in that state,
+    /// `UserDefaults.standard.object(forKey:)` returns `nil` even though the
+    /// plist file on disk has the correct value.
+    private static func readAutoStartFromPlistFile() -> Bool? {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let plistPath = "\(home)/Library/Preferences/com.macaudio.app.plist"
+        guard let dict = NSDictionary(contentsOfFile: plistPath) else { return nil }
+        return dict[autoStartCaptureKey] as? Bool
+    }
 
     func attemptAutoStart(retriesRemaining: Int = AppState.autoStartMaxRetries) {
         // cfprefsd may have been slow at init, leaving the in-memory pref stale
@@ -211,6 +225,17 @@ final class AppState: ObservableObject {
         }
 
         guard autoStartCapture else {
+            // cfprefsd may still not have loaded our domain — object(forKey:)
+            // returned nil above and boolIfPresent defaulted to false. As a
+            // last resort, read the plist file directly (bypasses cfprefsd).
+            if let plistValue = Self.readAutoStartFromPlistFile(), plistValue {
+                logger.notice("Auto-start: cfprefsd missed pref, plist says ON — retrying in \(Self.autoStartPrefRetryDelay)s")
+                autoStartCapture = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.autoStartPrefRetryDelay) { [weak self] in
+                    self?.attemptAutoStart(retriesRemaining: retriesRemaining)
+                }
+                return
+            }
             logger.notice("Auto-start: skipped (autoStartCapture is off)")
             return
         }
@@ -351,6 +376,10 @@ final class AppState: ObservableObject {
             UserDefaults.standard.set(uid, forKey: Self.selectedMicDeviceUIDKey)
         }
         UserDefaults.standard.set(autoStartCapture, forKey: Self.autoStartCaptureKey)
+        // Force an immediate flush to disk. Normally cfprefsd syncs
+        // periodically, but if the user reboots right after toggling
+        // Auto-Start we need the plist to already reflect the change.
+        UserDefaults.standard.synchronize()
     }
 
     private func loadPreferences() {
@@ -367,5 +396,14 @@ final class AppState: ObservableObject {
         preferredMicUID = UserDefaults.standard.string(forKey: Self.selectedMicDeviceUIDKey)
         autoStartCapture = UserDefaults.standard.boolIfPresent(
             forKey: Self.autoStartCaptureKey, default: autoStartCapture)
+
+        // cfprefsd may not have loaded our domain yet (common at login).
+        // If the key was missing, fall back to a direct plist read so the
+        // UI toggle reflects the real on-disk value from the start.
+        if UserDefaults.standard.object(forKey: Self.autoStartCaptureKey) == nil,
+           let plistValue = Self.readAutoStartFromPlistFile() {
+            logger.notice("loadPreferences: cfprefsd missed autoStartCapture, plist says \(plistValue)")
+            autoStartCapture = plistValue
+        }
     }
 }
