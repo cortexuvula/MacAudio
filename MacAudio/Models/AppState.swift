@@ -49,6 +49,12 @@ final class AppState: ObservableObject {
     /// when matching saved selection against the live device list.
     private var preferredMicUID: String?
 
+    /// Set when loadPreferences() read autoStartCapture from the plist file
+    /// because cfprefsd hadn't loaded our domain yet. Prevents attemptAutoStart()
+    /// from overwriting the known-good plist value with a stale cfprefsd cache
+    /// hit (nil → non-nil-but-wrong between the two reads).
+    private var didLoadAutoStartFromPlist = false
+
     init() {
         loadPreferences()
 
@@ -162,7 +168,7 @@ final class AppState: ObservableObject {
                 try service.unregister()
                 launchAtLogin = false
                 autoStartCapture = false
-                savePreferences()
+                saveAutoStartPreference()
                 logger.notice("Launch at Login: unregistered (auto-start also cleared)")
             } else {
                 try service.register()
@@ -191,7 +197,7 @@ final class AppState: ObservableObject {
             }
         }
         autoStartCapture.toggle()
-        savePreferences()
+        saveAutoStartPreference()
         logger.notice("Auto-Start Capturing: now \(self.autoStartCapture ? "ON" : "OFF") (saved)")
     }
 
@@ -216,12 +222,22 @@ final class AppState: ObservableObject {
         // cfprefsd may have been slow at init, leaving the in-memory pref stale
         // (defaulted to false even though the user had it on). By the time
         // auto-start fires, cfprefsd is reliably available — re-read and resync.
-        if UserDefaults.standard.object(forKey: Self.autoStartCaptureKey) != nil {
-            let liveValue = UserDefaults.standard.bool(forKey: Self.autoStartCaptureKey)
-            if autoStartCapture != liveValue {
-                logger.notice("Auto-start: pref refreshed from disk (in-memory=\(self.autoStartCapture) → live=\(liveValue))")
-                autoStartCapture = liveValue
+        //
+        // HOWEVER: if loadPreferences() fell back to the plist file (because
+        // cfprefsd returned nil), skip the refresh on the FIRST attempt.
+        // cfprefsd may now return a non-nil but STALE cached value (e.g. false
+        // from a previous session) — overwriting the correct plist value.
+        // On retries (cfprefsd had more time to sync), the refresh is safe.
+        if !didLoadAutoStartFromPlist || retriesRemaining < Self.autoStartMaxRetries {
+            if UserDefaults.standard.object(forKey: Self.autoStartCaptureKey) != nil {
+                let liveValue = UserDefaults.standard.bool(forKey: Self.autoStartCaptureKey)
+                if autoStartCapture != liveValue {
+                    logger.notice("Auto-start: pref refreshed from disk (in-memory=\(self.autoStartCapture) → live=\(liveValue))")
+                    autoStartCapture = liveValue
+                }
             }
+        } else {
+            logger.notice("Auto-start: skipping UserDefaults refresh (loaded from plist, first attempt)")
         }
 
         guard autoStartCapture else {
@@ -232,7 +248,7 @@ final class AppState: ObservableObject {
                 logger.notice("Auto-start: cfprefsd missed pref, plist says ON — retrying in \(Self.autoStartPrefRetryDelay)s")
                 autoStartCapture = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + Self.autoStartPrefRetryDelay) { [weak self] in
-                    self?.attemptAutoStart(retriesRemaining: retriesRemaining)
+                    self?.attemptAutoStart(retriesRemaining: retriesRemaining - 1)
                 }
                 return
             }
@@ -375,10 +391,20 @@ final class AppState: ObservableObject {
         if let uid = preferredMicUID {
             UserDefaults.standard.set(uid, forKey: Self.selectedMicDeviceUIDKey)
         }
+        // NOTE: autoStartCapture is intentionally NOT saved here.
+        // savePreferences() is called from didSet observers (volume changes)
+        // and cleanupForTermination(). Writing autoStartCapture from those
+        // paths can overwrite the correct on-disk value with a stale in-memory
+        // value — specifically when cfprefsd returned a wrong value at login
+        // and auto-start never ran. See saveAutoStartPreference() below.
+    }
+
+    /// Writes `autoStartCapture` to UserDefaults and flushes to disk.
+    /// Only called when the user explicitly toggles the setting, so the
+    /// in-memory value is guaranteed to reflect the user's intent (not a
+    /// stale cfprefsd cache hit from login).
+    private func saveAutoStartPreference() {
         UserDefaults.standard.set(autoStartCapture, forKey: Self.autoStartCaptureKey)
-        // Force an immediate flush to disk. Normally cfprefsd syncs
-        // periodically, but if the user reboots right after toggling
-        // Auto-Start we need the plist to already reflect the change.
         UserDefaults.standard.synchronize()
     }
 
@@ -397,13 +423,19 @@ final class AppState: ObservableObject {
         autoStartCapture = UserDefaults.standard.boolIfPresent(
             forKey: Self.autoStartCaptureKey, default: autoStartCapture)
 
-        // cfprefsd may not have loaded our domain yet (common at login).
-        // If the key was missing, fall back to a direct plist read so the
-        // UI toggle reflects the real on-disk value from the start.
-        if UserDefaults.standard.object(forKey: Self.autoStartCaptureKey) == nil,
-           let plistValue = Self.readAutoStartFromPlistFile() {
-            logger.notice("loadPreferences: cfprefsd missed autoStartCapture, plist says \(plistValue)")
-            autoStartCapture = plistValue
+        // The plist file is the most trustworthy source — it's written by
+        // synchronize() (direct disk write) and read by NSDictionary(contentsOfFile:)
+        // (direct disk read), bypassing cfprefsd entirely. If cfprefsd returns
+        // a value that disagrees with the plist, the plist is almost certainly
+        // correct and cfprefsd has a stale cache entry (common at login).
+        if let plistValue = Self.readAutoStartFromPlistFile() {
+            if autoStartCapture != plistValue {
+                logger.notice("loadPreferences: cfprefsd says \(self.autoStartCapture) but plist says \(plistValue) — trusting plist")
+                autoStartCapture = plistValue
+                didLoadAutoStartFromPlist = true
+            }
+        } else if UserDefaults.standard.object(forKey: Self.autoStartCaptureKey) == nil {
+            // cfprefsd returned nil AND no plist file — keep the default (false)
         }
     }
 }
