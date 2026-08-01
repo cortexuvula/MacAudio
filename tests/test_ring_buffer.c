@@ -19,6 +19,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include "SharedRingBuffer.h"
 
@@ -565,6 +566,93 @@ static void test_writer_reader_interleaved(void) {
     SharedRingBuffer_Destroy();
 }
 
+/*
+ * Cross-process SPSC contract. The existing tests are single-process and
+ * sequential, so they can't catch a regression where the writer mutates
+ * readHeadFrames (the reader-owned head). This forks a writer child and a
+ * reader parent that hammer the segment concurrently, then asserts:
+ *   - the reader never reads back more than kRingBufferFrames at once,
+ *   - both heads are strictly monotonic across the run,
+ *   - the writer's head never lags the reader's (reader can't see the future),
+ *   - the child exits cleanly (no crash from racing head updates).
+ */
+static void test_cross_process_spsc_contract(void) {
+    SharedRingBuffer_Destroy();                 /* start from a known state   */
+    SharedRingBuffer* w = SharedRingBuffer_CreateOrOpen(1);
+    assert(w);
+    SharedRingBuffer_SetActive(w, 1);
+
+    pid_t pid = fork();
+    assert(pid >= 0);
+
+    if (pid == 0) {
+        /* ---- Writer child: only ever touches writeHeadFrames ---- */
+        SharedRingBuffer* wc = SharedRingBuffer_CreateOrOpen(1);
+        assert(wc);
+        SharedRingBuffer_SetActive(wc, 1);
+
+        uint32_t chunk = 256;
+        float* src = calloc(chunk * kNumChannels, sizeof(float));
+        assert(src);
+        uint64_t lastWriteHead = 0;
+
+        for (uint32_t iter = 0; iter < 4000; iter++) {
+            for (uint32_t i = 0; i < chunk * kNumChannels; i++)
+                src[i] = (float)(iter + 1);       /* tag each chunk by iter   */
+            SharedRingBuffer_Write(wc, src, chunk);
+            uint64_t wh = SharedRingBuffer_GetWriteHead(wc);
+            assert(wh > lastWriteHead);            /* writer head monotonic    */
+            lastWriteHead = wh;
+        }
+        free(src);
+        SharedRingBuffer_Close(wc);
+        _exit(0);
+    }
+
+    /* ---- Reader parent: only ever touches readHeadFrames ---- */
+    SharedRingBuffer* r = SharedRingBuffer_CreateOrOpen(0);
+    assert(r);
+
+    uint32_t chunk = 256;
+    float* dst = calloc(chunk * kNumChannels, sizeof(float));
+    assert(dst);
+    uint64_t lastReadHead = 0;
+    int read_nonzero = 0;
+
+    /* Read until the writer finishes. Cap iterations so a dead child can't
+     * hang the suite. */
+    for (int iter = 0; iter < 100000; iter++) {
+        uint64_t got = SharedRingBuffer_Read(r, dst, chunk);
+        /* The cap in SharedRingBuffer_Read must bound every read regardless of
+         * head state. chunk < kRingBufferFrames so this also holds, but the
+         * invariant we most care about is documented explicitly here. */
+        assert(got <= kRingBufferFrames);
+        if (got > 0) {
+            read_nonzero++;
+            uint64_t rh = SharedRingBuffer_GetReadHead(r);
+            assert(rh > lastReadHead);             /* reader head monotonic    */
+            lastReadHead = rh;
+            /* Reader must never overtake the writer (can't read unread data). */
+            assert(rh <= SharedRingBuffer_GetWriteHead(w));
+        }
+        /* Bail out once the child is reaped and the buffer is drained. */
+        if (got == 0) {
+            int status = 0;
+            pid_t reaped = waitpid(pid, &status, WNOHANG);
+            if (reaped == pid) {
+                assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+                break;
+            }
+        }
+    }
+    assert(read_nonzero > 0);
+
+    free(dst);
+    SharedRingBuffer_Close(r);
+    SharedRingBuffer_Close(w);
+    SharedRingBuffer_Destroy();
+}
+
 /* ---------- Main ---------- */
 
 int main(void) {
@@ -609,6 +697,9 @@ int main(void) {
 
     printf("\nWriter + Reader Simulation:\n");
     RUN_TEST(test_writer_reader_interleaved);
+
+    printf("\nCross-Process SPSC:\n");
+    RUN_TEST(test_cross_process_spsc_contract);
 
     printf("\n===========================\n");
     printf("%d/%d tests passed.\n", tests_passed, tests_run);

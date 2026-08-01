@@ -34,6 +34,11 @@ SharedRingBuffer* SharedRingBuffer_CreateOrOpen(int forWriting) {
     // keeps reader and writer pointing at the same memory across Stop→Start.
 
     int flags = forWriting ? (O_CREAT | O_RDWR) : O_RDWR;
+    // Mode 0666 is intentional: the writer (user app) and the reader
+    // (coreaudiod, a different system UID) must both map this segment, so a
+    // restrictive 0600 would break the driver's read path. Safety against a
+    // corruptable/malicious segment comes from defensive head capping in
+    // SharedRingBuffer_Read, not from access control. Do not "tighten" this.
     int fd = shm_open(kSHM_Name, flags, 0666);
     if (fd < 0) {
         perror("shm_open");
@@ -128,20 +133,13 @@ uint64_t SharedRingBuffer_GetWriteHead(SharedRingBuffer* rb) {
 void SharedRingBuffer_Write(SharedRingBuffer* rb, const float* frames, uint32_t frameCount) {
     if (!rb || !frames || frameCount == 0) return;
 
+    // SPSC contract: the writer owns ONLY writeHeadFrames. It must never touch
+    // readHeadFrames — that belongs to the reader. On overrun (reader fell
+    // behind) the writer simply overwrites the oldest unread samples in place
+    // and advances writeHead; the reader detects that it was lapped and resyncs
+    // its own readHead forward in SharedRingBuffer_Read. Mutating readHead here
+    // would race the reader's own update and could lose/corrupt head state.
     uint64_t writeHead = atomic_load_explicit(&rb->writeHeadFrames, memory_order_acquire);
-    uint64_t readHead  = atomic_load_explicit(&rb->readHeadFrames,  memory_order_acquire);
-
-    // If the reader has fallen far enough behind that this write would overrun
-    // unread data, drop the oldest by advancing readHead. This keeps the buffer
-    // bounded and guarantees the reader will not see torn data mid-memcpy.
-    // (Reader stalls happen on driver glitches; preferring to drop oldest keeps
-    // the live audio path latency-bounded.)
-    uint64_t inUse = writeHead - readHead;
-    if (inUse + frameCount > kRingBufferFrames) {
-        uint64_t needToAdvance = inUse + frameCount - kRingBufferFrames;
-        atomic_store_explicit(&rb->readHeadFrames,
-                              readHead + needToAdvance, memory_order_release);
-    }
 
     uint32_t offset = (uint32_t)(writeHead & (kRingBufferFrames - 1));
     uint32_t remaining = frameCount;
@@ -189,7 +187,19 @@ uint64_t SharedRingBuffer_Read(SharedRingBuffer* rb, float* outBuffer, uint32_t 
     uint64_t writeHead = atomic_load_explicit(&rb->writeHeadFrames, memory_order_acquire);
     uint64_t available = writeHead - readHead;
 
+    // The reader owns readHeadFrames exclusively. If the writer has lapped us
+    // (or heads are otherwise corrupted/stale), 'available' can exceed the
+    // buffer capacity. Resync our own readHead forward to one buffer behind the
+    // writer and clamp available — this also bounds every memcpy below to
+    // kRingBufferFrames regardless of what the heads contain, closing the OOB
+    // read path corrupted heads would otherwise enable.
+    if (available > kRingBufferFrames) {
+        readHead = writeHead - kRingBufferFrames;
+        available = kRingBufferFrames;
+    }
+
     uint32_t framesToRead = (available >= frameCount) ? frameCount : (uint32_t)available;
+    if (framesToRead > kRingBufferFrames) framesToRead = kRingBufferFrames;
 
     if (framesToRead > 0) {
         uint32_t offset = (uint32_t)(readHead & (kRingBufferFrames - 1));

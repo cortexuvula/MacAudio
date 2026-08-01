@@ -22,10 +22,16 @@ final class SampleRateConverterTests: XCTestCase {
         let frameCount: UInt32 = 1024
         let samples = Array(repeating: Float(0.0), count: Int(frameCount) * 2)
 
-        let result = samples.withUnsafeBufferPointer { buf -> (UnsafePointer<Float>, UInt32)? in
-            src.convert(buf.baseAddress!, frameCount: frameCount)
+        // Worst-case output capacity for a 2x upsample.
+        let outCapacity = UInt32(Int(frameCount) * 2 * 2 + 2)
+        var out = [Float](repeating: 0, count: Int(outCapacity))
+        let outFrames = samples.withUnsafeBufferPointer { buf -> UInt32 in
+            out.withUnsafeMutableBufferPointer { outBuf in
+                src.convert(buf.baseAddress!, frameCount: frameCount,
+                            into: outBuf.baseAddress!, outputCapacity: outCapacity)
+            }
         }
-        guard let (_, outFrames) = result else { return XCTFail("convert returned nil") }
+        XCTAssertGreaterThan(outFrames, 0, "convert should produce output")
 
         // 48k → 96k: expect roughly 2x frames. AVAudioConverter may emit
         // a few extra/fewer at the boundary; assert "close to 2x" with
@@ -41,10 +47,15 @@ final class SampleRateConverterTests: XCTestCase {
         let frameCount: UInt32 = 2048
         let samples = Array(repeating: Float(0.0), count: Int(frameCount) * 2)
 
-        let result = samples.withUnsafeBufferPointer { buf -> (UnsafePointer<Float>, UInt32)? in
-            src.convert(buf.baseAddress!, frameCount: frameCount)
+        let outCapacity = frameCount * 2
+        var out = [Float](repeating: 0, count: Int(outCapacity))
+        let outFrames = samples.withUnsafeBufferPointer { buf -> UInt32 in
+            out.withUnsafeMutableBufferPointer { outBuf in
+                src.convert(buf.baseAddress!, frameCount: frameCount,
+                            into: outBuf.baseAddress!, outputCapacity: outCapacity)
+            }
         }
-        guard let (_, outFrames) = result else { return XCTFail("convert returned nil") }
+        XCTAssertGreaterThan(outFrames, 0, "convert should produce output")
 
         XCTAssertLessThan(outFrames, frameCount, "downsample should produce fewer frames")
         XCTAssertGreaterThan(outFrames, frameCount / 4, "downsample should not collapse output")
@@ -59,10 +70,15 @@ final class SampleRateConverterTests: XCTestCase {
         let largeFrameCount: UInt32 = 1024
         let samples = Array(repeating: Float(0.1), count: Int(largeFrameCount) * 2)
 
-        let result = samples.withUnsafeBufferPointer { buf -> (UnsafePointer<Float>, UInt32)? in
-            src.convert(buf.baseAddress!, frameCount: largeFrameCount)
+        let outCapacity = largeFrameCount * 2
+        var out = [Float](repeating: 0, count: Int(outCapacity))
+        let outFrames = samples.withUnsafeBufferPointer { buf -> UInt32 in
+            out.withUnsafeMutableBufferPointer { outBuf in
+                src.convert(buf.baseAddress!, frameCount: largeFrameCount,
+                            into: outBuf.baseAddress!, outputCapacity: outCapacity)
+            }
         }
-        XCTAssertNotNil(result, "convert must succeed by reallocating internal buffers")
+        XCTAssertGreaterThan(outFrames, 0, "convert must succeed by reallocating internal buffers")
     }
 
     func test_convert_preserves_silence_as_silence() {
@@ -72,16 +88,59 @@ final class SampleRateConverterTests: XCTestCase {
         let frameCount: UInt32 = 512
         let zeros = Array(repeating: Float(0.0), count: Int(frameCount) * 2)
 
-        let result = zeros.withUnsafeBufferPointer { buf -> (UnsafePointer<Float>, UInt32)? in
-            src.convert(buf.baseAddress!, frameCount: frameCount)
+        let outCapacity = frameCount * 2
+        var out = [Float](repeating: 0, count: Int(outCapacity))
+        let outFrames = zeros.withUnsafeBufferPointer { buf -> UInt32 in
+            out.withUnsafeMutableBufferPointer { outBuf in
+                src.convert(buf.baseAddress!, frameCount: frameCount,
+                            into: outBuf.baseAddress!, outputCapacity: outCapacity)
+            }
         }
-        guard let (outPtr, outFrames) = result else { return XCTFail("convert returned nil") }
+        XCTAssertGreaterThan(outFrames, 0, "convert should produce output")
 
         // The downsample of pure silence must remain effectively silent.
         // Allow for tiny numerical noise from filtering.
-        let outSamples = UnsafeBufferPointer(start: outPtr, count: Int(outFrames) * 2)
-        for sample in outSamples {
-            XCTAssertLessThan(abs(sample), 1e-5, "silent input should remain silent")
+        for i in 0..<Int(outFrames) * 2 {
+            XCTAssertLessThan(abs(out[i]), 1e-5, "silent input should remain silent")
+        }
+    }
+
+    func test_convert_writes_into_caller_buffer_not_internal() {
+        // Regression guard for the escaping-pointer hazard: the caller-owned
+        // buffer must hold the exact output and remain valid independent of the
+        // converter's internal state. A second call with different input must
+        // not retroactively change the first output.
+        guard let src = SampleRateConverter(sourceRate: 48000, destRate: 96000) else {
+            return XCTFail("expected SRC to init")
+        }
+        let frameCount: UInt32 = 256
+        let loud = Array(repeating: Float(0.5), count: Int(frameCount) * 2)
+        let outCapacity = UInt32(Int(frameCount) * 2 * 2 + 2)
+
+        var firstOut = [Float](repeating: 0, count: Int(outCapacity))
+        let firstFrames = loud.withUnsafeBufferPointer { buf -> UInt32 in
+            firstOut.withUnsafeMutableBufferPointer { outBuf in
+                src.convert(buf.baseAddress!, frameCount: frameCount,
+                            into: outBuf.baseAddress!, outputCapacity: outCapacity)
+            }
+        }
+        XCTAssertGreaterThan(firstFrames, 0)
+        // Snapshot what the caller's buffer holds after call 1.
+        let snapshot = Array(firstOut.prefix(Int(firstFrames) * 2))
+
+        // Second, independent call with silence into a different buffer.
+        let silent = Array(repeating: Float(0.0), count: Int(frameCount) * 2)
+        var secondOut = [Float](repeating: 0, count: Int(outCapacity))
+        _ = silent.withUnsafeBufferPointer { buf -> UInt32 in
+            secondOut.withUnsafeMutableBufferPointer { outBuf in
+                src.convert(buf.baseAddress!, frameCount: frameCount,
+                            into: outBuf.baseAddress!, outputCapacity: outCapacity)
+            }
+        }
+
+        // The first caller buffer must be unaffected by the second call.
+        for i in 0..<Int(firstFrames) * 2 {
+            XCTAssertEqual(firstOut[i], snapshot[i], "caller buffer must not be mutated by a later call")
         }
     }
 }

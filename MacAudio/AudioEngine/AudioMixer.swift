@@ -163,11 +163,20 @@ final class AudioMixer {
             } else {
                 srcPtr = floatPtr
             }
-            if let (resampledPtr, resampledFrames) = converter.convert(srcPtr, frameCount: UInt32(frames)) {
-                stereoPtr = resampledPtr
-                finalFrameCount = resampledFrames
-                frames = Int(resampledFrames)
-                stereoBuffer = nil // use resampledPtr instead
+            // Convert into a caller-owned buffer so no internal pointer escapes
+            // the converter. Capacity for the worst-case upsample of this input.
+            let ratio = converter.outputRate / converter.inputRate
+            let maxOutFrames = Int(ceil(Double(frames) * ratio)) + 1
+            var resampled = [Float](repeating: 0, count: maxOutFrames * outChannels)
+            let written = resampled.withUnsafeMutableBufferPointer { outPtr -> UInt32 in
+                converter.convert(srcPtr, frameCount: UInt32(frames),
+                                   into: outPtr.baseAddress!,
+                                   outputCapacity: UInt32(maxOutFrames * outChannels))
+            }
+            if written > 0 {
+                finalFrameCount = written
+                frames = Int(written)
+                stereoBuffer = resampled // carry ownership through the closures below
             }
         } else if let buf = stereoBuffer {
             // No converter, but we have a stereo buffer from upmix
@@ -269,11 +278,20 @@ final class AudioMixer {
             } else {
                 srcPtr = UnsafePointer(sysFloats)
             }
-            if let (resampledPtr, resampledFrames) = converter.convert(srcPtr, frameCount: UInt32(frames)) {
-                sysPtr = resampledPtr
-                finalFrameCount = resampledFrames
-                frames = Int(resampledFrames)
-                stereoBuffer = nil
+            // Convert into a caller-owned buffer so no internal pointer escapes
+            // the converter.
+            let ratio = converter.outputRate / converter.inputRate
+            let maxOutFrames = Int(ceil(Double(frames) * ratio)) + 1
+            var resampled = [Float](repeating: 0, count: maxOutFrames * channels)
+            let written = resampled.withUnsafeMutableBufferPointer { outPtr -> UInt32 in
+                converter.convert(srcPtr, frameCount: UInt32(frames),
+                                   into: outPtr.baseAddress!,
+                                   outputCapacity: UInt32(maxOutFrames * channels))
+            }
+            if written > 0 {
+                finalFrameCount = written
+                frames = Int(written)
+                stereoBuffer = resampled
             }
         }
 

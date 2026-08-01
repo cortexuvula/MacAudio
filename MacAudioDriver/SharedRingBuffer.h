@@ -15,6 +15,14 @@ extern "C" {
 #define kMaxFrameSize       (kRingBufferFrames * kNumChannels)
 #define kSHM_BufferBytes    (kMaxFrameSize * sizeof(float))
 
+// The read/write wrap indexing uses `head & (kRingBufferFrames - 1)`, which is
+// only correct when kRingBufferFrames is a power of two. Enforce it, and the
+// derived layout, at compile time.
+_Static_assert((kRingBufferFrames & (kRingBufferFrames - 1)) == 0,
+               "kRingBufferFrames must be a power of two for the wrap mask");
+_Static_assert(kMaxFrameSize == kRingBufferFrames * kNumChannels,
+               "buffer layout mismatch");
+
 // Opaque type — Swift interacts only through accessor functions
 typedef struct SharedRingBuffer SharedRingBuffer;
 

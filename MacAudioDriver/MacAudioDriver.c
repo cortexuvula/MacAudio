@@ -75,9 +75,9 @@ static _Atomic(SharedRingBuffer*) gRingBuffer = NULL;
 // at the next StartIO under gDevice_IOMutex, by which time the HAL guarantees
 // all IO cycles for the prior session have ended.
 static SharedRingBuffer*         gRingBuffer_PendingClose = NULL;
-static Float64                   gDevice_SampleRate = kDevice_DefaultSampleRate;
-static UInt32                    gDevice_IOClientCount = 0;
-static bool                      gDevice_IOIsRunning = false;
+static _Atomic Float64           gDevice_SampleRate = kDevice_DefaultSampleRate;
+static _Atomic UInt32            gDevice_IOClientCount = 0;
+static _Atomic bool              gDevice_IOIsRunning = false;
 static _Atomic double            gDevice_HostTicksPerFrame = 0.0;
 static _Atomic uint64_t          gDevice_AnchorHostTime = 0;
 static UInt64                    gDevice_TimeStampCounter = 0;
@@ -90,7 +90,8 @@ static void recalcHostTicksPerFrame(void) {
     mach_timebase_info_data_t timebase;
     mach_timebase_info(&timebase);
     Float64 nanosPerTick = (Float64)timebase.numer / (Float64)timebase.denom;
-    Float64 ticks = (1000000000.0 / gDevice_SampleRate) / nanosPerTick;
+    Float64 sampleRate = atomic_load_explicit(&gDevice_SampleRate, memory_order_acquire);
+    Float64 ticks = (1000000000.0 / sampleRate) / nanosPerTick;
     atomic_store_explicit(&gDevice_HostTicksPerFrame, ticks, memory_order_release);
 }
 
@@ -666,7 +667,7 @@ static OSStatus MacAudio_GetPropertyData(AudioServerPlugInDriverRef inDriver, Au
             case kAudioDevicePropertyDeviceIsRunning:
                 if (inDataSize < sizeof(UInt32)) return kAudioHardwareBadPropertySizeError;
                 *outDataSize = sizeof(UInt32);
-                *((UInt32*)outData) = gDevice_IOIsRunning ? 1 : 0;
+                *((UInt32*)outData) = atomic_load_explicit(&gDevice_IOIsRunning, memory_order_acquire) ? 1 : 0;
                 return noErr;
 
             case kAudioDevicePropertyDeviceCanBeDefaultDevice:
@@ -734,7 +735,7 @@ static OSStatus MacAudio_GetPropertyData(AudioServerPlugInDriverRef inDriver, Au
             case kAudioDevicePropertyNominalSampleRate:
                 if (inDataSize < sizeof(Float64)) return kAudioHardwareBadPropertySizeError;
                 *outDataSize = sizeof(Float64);
-                *((Float64*)outData) = gDevice_SampleRate;
+                *((Float64*)outData) = atomic_load_explicit(&gDevice_SampleRate, memory_order_acquire);
                 return noErr;
 
             case kAudioDevicePropertyAvailableNominalSampleRates: {
@@ -844,7 +845,7 @@ static OSStatus MacAudio_GetPropertyData(AudioServerPlugInDriverRef inDriver, Au
                 if (inDataSize < sizeof(AudioStreamBasicDescription)) return kAudioHardwareBadPropertySizeError;
                 *outDataSize = sizeof(AudioStreamBasicDescription);
                 AudioStreamBasicDescription* desc = (AudioStreamBasicDescription*)outData;
-                desc->mSampleRate = gDevice_SampleRate;
+                desc->mSampleRate = atomic_load_explicit(&gDevice_SampleRate, memory_order_acquire);
                 desc->mFormatID = kAudioFormatLinearPCM;
                 desc->mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagsNativeEndian | kAudioFormatFlagIsPacked;
                 desc->mBytesPerPacket = kDevice_BytesPerFrame;
@@ -974,7 +975,7 @@ static OSStatus MacAudio_SetPropertyData(AudioServerPlugInDriverRef inDriver, Au
                 if (!valid) return kAudioHardwareIllegalOperationError;
 
                 pthread_mutex_lock(&gDevice_IOMutex);
-                gDevice_SampleRate = newRate;
+                atomic_store_explicit(&gDevice_SampleRate, newRate, memory_order_release);
                 recalcHostTicksPerFrame();
                 pthread_mutex_unlock(&gDevice_IOMutex);
 
@@ -1001,17 +1002,33 @@ static OSStatus MacAudio_SetPropertyData(AudioServerPlugInDriverRef inDriver, Au
                 inAddress->mSelector == kAudioStreamPropertyPhysicalFormat) {
                 if (inDataSize < sizeof(AudioStreamBasicDescription)) return kAudioHardwareBadPropertySizeError;
                 const AudioStreamBasicDescription* desc = (const AudioStreamBasicDescription*)inData;
-                bool valid = false;
+                // Validate the full ASBD, not just the sample rate. The getter
+                // advertises one specific format (see the matching getter), so
+                // silently accepting e.g. an integer-PCM or mono request would
+                // make the device report a format it doesn't actually render.
+                bool rateValid = false;
                 for (UInt32 i = 0; i < kNumSupportedSampleRates; i++) {
                     if (kSupportedSampleRates[i] == desc->mSampleRate) {
-                        valid = true;
+                        rateValid = true;
                         break;
                     }
                 }
-                if (!valid) return kAudioDeviceUnsupportedFormatError;
+                if (!rateValid) return kAudioDeviceUnsupportedFormatError;
+                if (desc->mFormatID != kAudioFormatLinearPCM) return kAudioDeviceUnsupportedFormatError;
+                // Require float + native-endian + packed, but tolerate extra
+                // benign flags the HAL may add (e.g. kAudioFormatFlagIsNonMixable).
+                const UInt32 kRequiredFormatFlags =
+                    kAudioFormatFlagIsFloat | kAudioFormatFlagsNativeEndian | kAudioFormatFlagIsPacked;
+                if ((desc->mFormatFlags & kRequiredFormatFlags) != kRequiredFormatFlags)
+                    return kAudioDeviceUnsupportedFormatError;
+                if (desc->mChannelsPerFrame != kDevice_NumChannels) return kAudioDeviceUnsupportedFormatError;
+                if (desc->mBitsPerChannel != kDevice_BitsPerChannel) return kAudioDeviceUnsupportedFormatError;
+                if (desc->mBytesPerFrame != kDevice_BytesPerFrame) return kAudioDeviceUnsupportedFormatError;
+                if (desc->mBytesPerPacket != kDevice_BytesPerFrame) return kAudioDeviceUnsupportedFormatError;
+                if (desc->mFramesPerPacket != 1) return kAudioDeviceUnsupportedFormatError;
 
                 pthread_mutex_lock(&gDevice_IOMutex);
-                gDevice_SampleRate = desc->mSampleRate;
+                atomic_store_explicit(&gDevice_SampleRate, desc->mSampleRate, memory_order_release);
                 recalcHostTicksPerFrame();
                 pthread_mutex_unlock(&gDevice_IOMutex);
 
@@ -1072,8 +1089,9 @@ static OSStatus MacAudio_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjec
 
     pthread_mutex_lock(&gDevice_IOMutex);
 
-    if (gDevice_IOClientCount == 0) {
-        gDevice_IOIsRunning = true;
+    UInt32 clientCount = atomic_load_explicit(&gDevice_IOClientCount, memory_order_acquire);
+    if (clientCount == 0) {
+        atomic_store_explicit(&gDevice_IOIsRunning, true, memory_order_release);
         atomic_store_explicit(&gDevice_AnchorHostTime, mach_absolute_time(), memory_order_release);
         gDevice_TimeStampCounter = 0;
 
@@ -1097,11 +1115,14 @@ static OSStatus MacAudio_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjec
             // Still continue - device can work, just silent
         }
     }
-    gDevice_IOClientCount++;
+    clientCount++;
+    atomic_store_explicit(&gDevice_IOClientCount, clientCount, memory_order_release);
 
     pthread_mutex_unlock(&gDevice_IOMutex);
 
-    os_log(gLog, "StartIO: client count = %u", gDevice_IOClientCount);
+    // Log the locally-captured count, not the shared atomic, so the value is
+    // exact for this call regardless of concurrent Start/Stop on other threads.
+    os_log(gLog, "StartIO: client count = %u", clientCount);
     return noErr;
 }
 
@@ -1110,11 +1131,12 @@ static OSStatus MacAudio_StopIO(AudioServerPlugInDriverRef inDriver, AudioObject
 
     pthread_mutex_lock(&gDevice_IOMutex);
 
-    if (gDevice_IOClientCount > 0) {
-        gDevice_IOClientCount--;
+    UInt32 clientCount = atomic_load_explicit(&gDevice_IOClientCount, memory_order_acquire);
+    if (clientCount > 0) {
+        clientCount--;
     }
-    if (gDevice_IOClientCount == 0) {
-        gDevice_IOIsRunning = false;
+    if (clientCount == 0) {
+        atomic_store_explicit(&gDevice_IOIsRunning, false, memory_order_release);
         // Detach the buffer atomically, but defer the actual munmap to the
         // next StartIO. Any DoIOOperation racing with this StopIO may have
         // already loaded gRingBuffer; munmap'ing now would risk SIGBUS in
@@ -1131,10 +1153,11 @@ static OSStatus MacAudio_StopIO(AudioServerPlugInDriverRef inDriver, AudioObject
             gRingBuffer_PendingClose = oldRb;
         }
     }
+    atomic_store_explicit(&gDevice_IOClientCount, clientCount, memory_order_release);
 
     pthread_mutex_unlock(&gDevice_IOMutex);
 
-    os_log(gLog, "StopIO: client count = %u", gDevice_IOClientCount);
+    os_log(gLog, "StopIO: client count = %u", clientCount);
     return noErr;
 }
 
@@ -1143,6 +1166,16 @@ static OSStatus MacAudio_GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, A
 
     UInt64 anchorHostTime = atomic_load_explicit(&gDevice_AnchorHostTime, memory_order_acquire);
     Float64 hostTicksPerFrame = atomic_load_explicit(&gDevice_HostTicksPerFrame, memory_order_acquire);
+
+    // Guard against an uninitialized/zero hostTicksPerFrame (e.g. called before
+    // MacAudio_Initialize finishes, or if the sample rate were ever zero). A
+    // division here would yield inf/NaN and the casts to UInt64 would be UB.
+    if (hostTicksPerFrame <= 0.0) {
+        *outSampleTime = 0;
+        *outHostTime = anchorHostTime;
+        *outSeed = 1;
+        return noErr;
+    }
 
     UInt64 currentHostTime = mach_absolute_time();
     Float64 elapsedTicks = (Float64)(currentHostTime - anchorHostTime);
