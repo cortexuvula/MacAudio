@@ -567,6 +567,102 @@ static void test_writer_reader_interleaved(void) {
 }
 
 /*
+ * Deterministic reader-overrun resync. Fills the buffer completely without
+ * reading, then writes a second full buffer — the writer laps the reader by
+ * exactly kRingBufferFrames, exercising the `available > kRingBufferFrames`
+ * resync branch in SharedRingBuffer_Read. This is the core memory-safety fix:
+ * the reader must (a) return at most kRingBufferFrames, (b) resync its own
+ * readHead to writeHead - kRingBufferFrames, and (c) read back the NEWEST
+ * samples (oldest were overwritten), proving the resync pointed at the right
+ * place.
+ */
+static void test_reader_resync_after_overrun(void) {
+    SharedRingBuffer* w = fresh_writer();
+    SharedRingBuffer* r = SharedRingBuffer_CreateOrOpen(0);
+    assert(r != NULL);
+
+    float* src = calloc(kRingBufferFrames * kNumChannels, sizeof(float));
+    assert(src);
+
+    /* First fill: tag every sample with 1.0 (the "old" data). */
+    for (uint32_t i = 0; i < kRingBufferFrames * kNumChannels; i++) src[i] = 1.0f;
+    SharedRingBuffer_Write(w, src, kRingBufferFrames);
+    /* Do NOT read — let the reader fall a full buffer behind. */
+
+    /* Second fill: tag with 2.0 (the "new" data). Writer now laps reader. */
+    for (uint32_t i = 0; i < kRingBufferFrames * kNumChannels; i++) src[i] = 2.0f;
+    SharedRingBuffer_Write(w, src, kRingBufferFrames);
+
+    /* writeHead is now 2 * kRingBufferFrames; readHead is still 0, so
+     * available == 2 * kRingBufferFrames > kRingBufferFrames -> resync path. */
+    uint64_t writeHead = SharedRingBuffer_GetWriteHead(w);
+    assert(writeHead == 2 * (uint64_t)kRingBufferFrames);
+
+    /* Read a PARTIAL amount (half the buffer). If the resync branch fired, the
+     * reader's local readHead becomes (writeHead - kRingBufferFrames) before the
+     * read, so after reading `half` frames the stored readHead is
+     * (writeHead - kRingBufferFrames) + half. A full read would mask the resync
+     * point (it'd land exactly at writeHead); a partial read leaves it visible. */
+    uint32_t half = kRingBufferFrames / 2;
+    float* dst = calloc(half * kNumChannels, sizeof(float));
+    assert(dst);
+    uint64_t got = SharedRingBuffer_Read(r, dst, half);
+
+    /* (a) the read is bounded — never more than requested, never more than
+     * kRingBufferFrames regardless of head state. */
+    assert(got == half);
+    assert(got <= kRingBufferFrames);
+
+    /* (b) readHead == resync_point + got == (writeHead - kRingBufferFrames) + half.
+     * This is the direct evidence the resync branch executed and pointed at
+     * (writeHead - kRingBufferFrames). Without resync it would be just `half`. */
+    uint64_t readHead = SharedRingBuffer_GetReadHead(r);
+    assert(readHead == (writeHead - kRingBufferFrames) + half);
+
+    /* (c) every returned sample is the NEW data (2.0), not the old (1.0). The
+     * second fill wrapped and overwrote the whole buffer with 2.0; only a
+     * resync to the newest kRingBufferFrames yields all-new samples. */
+    for (uint32_t i = 0; i < half * kNumChannels; i++) {
+        assert(fabsf(dst[i] - 2.0f) < 1e-6f);
+    }
+
+    free(src);
+    free(dst);
+    SharedRingBuffer_Close(r);
+    SharedRingBuffer_Close(w);
+    SharedRingBuffer_Destroy();
+}
+
+/*
+ * A read requesting MORE than kRingBufferFrames must never return more than
+ * kRingBufferFrames, regardless of head state. This guards the OOB vector the
+ * code review flagged: without the cap, corrupted heads could drive an
+ * oversized memcpy.
+ */
+static void test_read_capped_to_buffer_size(void) {
+    SharedRingBuffer* w = fresh_writer();
+    SharedRingBuffer* r = SharedRingBuffer_CreateOrOpen(0);
+    assert(r != NULL);
+
+    /* Fill the buffer completely so available == kRingBufferFrames. */
+    float* src = calloc(kRingBufferFrames * kNumChannels, sizeof(float));
+    assert(src);
+    SharedRingBuffer_Write(w, src, kRingBufferFrames);
+
+    /* Request 4x the capacity — must be capped to kRingBufferFrames. */
+    float* dst = calloc(kRingBufferFrames * kNumChannels * 4, sizeof(float));
+    assert(dst);
+    uint64_t got = SharedRingBuffer_Read(r, dst, kRingBufferFrames * 4);
+    assert(got == kRingBufferFrames);
+
+    free(src);
+    free(dst);
+    SharedRingBuffer_Close(r);
+    SharedRingBuffer_Close(w);
+    SharedRingBuffer_Destroy();
+}
+
+/*
  * Cross-process SPSC contract. The existing tests are single-process and
  * sequential, so they can't catch a regression where the writer mutates
  * readHeadFrames (the reader-owned head). This forks a writer child and a
@@ -685,6 +781,7 @@ int main(void) {
     RUN_TEST(test_zero_length_write);
     RUN_TEST(test_read_more_than_available);
     RUN_TEST(test_read_empty_buffer);
+    RUN_TEST(test_read_capped_to_buffer_size);
 
     printf("\nNULL Safety:\n");
     RUN_TEST(test_null_write);
@@ -697,6 +794,7 @@ int main(void) {
 
     printf("\nWriter + Reader Simulation:\n");
     RUN_TEST(test_writer_reader_interleaved);
+    RUN_TEST(test_reader_resync_after_overrun);
 
     printf("\nCross-Process SPSC:\n");
     RUN_TEST(test_cross_process_spsc_contract);

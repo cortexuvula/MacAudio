@@ -235,6 +235,84 @@ class TestSharedRingBufferAPI(unittest.TestCase):
         self.assertNotIn("float buffer", self.rb_h,
                           "Header must not expose internal buffer field")
 
+    def test_writer_does_not_mutate_read_head(self):
+        """SPSC contract regression guard: SharedRingBuffer_Write must NEVER store
+        to readHeadFrames. The reader owns that head exclusively; a writer-side
+        store races the reader's own update and was the original bug. This is a
+        deterministic check where the cross-process test only catches it
+        probabilistically.
+
+        Checks for the *store* operation specifically — the field name may
+        legitimately appear in comments explaining the contract."""
+        write_body = self._extract_function_body(
+            self.rb_c, "SharedRingBuffer_Write")
+        self.assertIsNotNone(write_body,
+                             "could not locate SharedRingBuffer_Write body")
+        self.assertNotIn("atomic_store_explicit(&rb->readHeadFrames", write_body,
+                         "Writer must not store readHeadFrames — that head is "
+                         "owned exclusively by the reader (SPSC contract). "
+                         "A writer-side store races the reader's own update.")
+
+    def test_reader_resyncs_on_overrun(self):
+        """Guards the reader's defensive resync: SharedRingBuffer_Read must cap
+        available / framesToRead to kRingBufferFrames so corrupted heads can't
+        drive an oversized memcpy (the OOB vector)."""
+        read_body = self._extract_function_body(
+            self.rb_c, "SharedRingBuffer_Read")
+        self.assertIsNotNone(read_body,
+                             "could not locate SharedRingBuffer_Read body")
+        self.assertRegex(read_body, r"available\s*>\s*kRingBufferFrames",
+                         "Reader must resync when available > kRingBufferFrames")
+        self.assertIn("framesToRead > kRingBufferFrames", read_body,
+                      "Reader must cap framesToRead to kRingBufferFrames")
+
+    @staticmethod
+    def _extract_function_body(src, fn_name):
+        """Return the body of a C function definition `fn_name` (from signature
+        to its matching closing brace), or None if not found. Skips forward
+        declarations (signature followed by ';') and comment/call mentions by
+        requiring a '{' before the next ';'. Brace matching is naive (ignores
+        braces in string/char literals), which is sufficient for these files."""
+        pat = re.compile(r"\b" + re.escape(fn_name) + r"\s*\(")
+        pos = 0
+        while True:
+            m = pat.search(src, pos)
+            if not m:
+                return None
+            # Walk the parameter list to its closing paren.
+            depth = 0
+            i = m.end() - 1  # index of '('
+            while i < len(src):
+                if src[i] == "(":
+                    depth += 1
+                elif src[i] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                i += 1
+            # A definition has '{' before the next ';'. A forward declaration
+            # has ';' first — skip it and keep searching.
+            semi = src.find(";", i)
+            brace = src.find("{", i)
+            if brace != -1 and (semi == -1 or brace < semi):
+                break  # found the definition
+            pos = m.end()  # else advance past this declaration and retry
+        if brace == -1:
+            return None
+        # Match braces to find the function end.
+        depth = 0
+        j = brace
+        while j < len(src):
+            c = src[j]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return src[brace:j + 1]
+            j += 1
+        return src[brace:]  # unbalanced; return what we have
+
 
 # ---------------------------------------------------------------------------
 # Entitlements — catches xcodegen wipe
@@ -374,6 +452,50 @@ class TestDriverAtomicSafety(unittest.TestCase):
     def test_recalc_helper_exists(self):
         self.assertIn("recalcHostTicksPerFrame", self.drv_c,
                        "recalcHostTicksPerFrame helper must exist")
+
+    def test_gDevice_SampleRate_is_atomic(self):
+        """gDevice_SampleRate is read in property getters unlocked and written
+        under the mutex; it must be _Atomic Float64 to avoid a data race."""
+        self.assertRegex(self.drv_c, r"_Atomic\s+Float64\s+gDevice_SampleRate",
+                         "gDevice_SampleRate must be _Atomic Float64")
+
+    def test_gDevice_IOClientCount_is_atomic(self):
+        """gDevice_IOClientCount is logged after unlocking; it must be _Atomic."""
+        self.assertRegex(self.drv_c, r"_Atomic\s+UInt32\s+gDevice_IOClientCount",
+                         "gDevice_IOClientCount must be _Atomic UInt32")
+
+    def test_gDevice_IOIsRunning_is_atomic(self):
+        """gDevice_IOIsRunning is read unlocked in the DeviceIsRunning getter;
+        it must be _Atomic bool."""
+        self.assertRegex(self.drv_c, r"_Atomic\s+bool\s+gDevice_IOIsRunning",
+                         "gDevice_IOIsRunning must be _Atomic bool")
+
+    def test_stream_format_setter_validates_format_id(self):
+        """The stream-format setter must validate mFormatID against
+        kAudioFormatLinearPCM, not just the sample rate. Scoped to
+        MacAudio_SetPropertyData (the setter), not the getter/IsSettable paths
+        that reference the same selector."""
+        setprop = self._extract_set_property_data_body()
+        self.assertIsNotNone(setprop, "could not locate SetPropertyData body")
+        # The validation lives after the sample-rate loop; search the whole
+        # setter rather than a sub-slice (the loop's 'break;' would truncate it).
+        self.assertIn("desc->mFormatID != kAudioFormatLinearPCM", setprop,
+                      "stream-format setter must validate mFormatID == kAudioFormatLinearPCM")
+
+    def test_stream_format_setter_validates_channels(self):
+        """The stream-format setter must validate mChannelsPerFrame."""
+        setprop = self._extract_set_property_data_body()
+        self.assertIsNotNone(setprop, "could not locate SetPropertyData body")
+        self.assertIn("desc->mChannelsPerFrame", setprop,
+                      "stream-format setter must validate mChannelsPerFrame")
+
+    @staticmethod
+    def _extract_set_property_data_body():
+        """Return the full MacAudio_SetPropertyData function body (the only
+        place a stream-format *change* is accepted), or None."""
+        drv = TestDriverAtomicSafety.drv_c
+        return TestSharedRingBufferAPI._extract_function_body(
+            drv, "MacAudio_SetPropertyData")
 
 
 # ---------------------------------------------------------------------------
