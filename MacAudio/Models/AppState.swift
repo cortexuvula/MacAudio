@@ -108,10 +108,18 @@ final class AppState: ObservableObject {
     }
 
     func updateMicDevice(_ deviceID: AudioDeviceID) {
+        let previousDeviceID = selectedMicDeviceID
         selectedMicDeviceID = deviceID
         // Remember by UID so a brief unplug doesn't lose the user's preference.
         preferredMicUID = availableMicDevices.first(where: { $0.id == deviceID })?.uid
-        audioMixer?.setMicDevice(deviceID)
+        if let switchError = audioMixer?.setMicDevice(deviceID) {
+            // Live switch failed and the mixer restored the previous device;
+            // point the menu back at the device that is actually capturing.
+            selectedMicDeviceID = previousDeviceID
+            preferredMicUID = availableMicDevices.first(where: { $0.id == previousDeviceID })?.uid
+            lastError = switchError
+            logger.error("Mic device switch failed, keeping device \(previousDeviceID): \(switchError)")
+        }
         savePreferences()
     }
 

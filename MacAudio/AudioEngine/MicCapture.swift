@@ -4,7 +4,7 @@ import Foundation
 import os
 
 final class MicCapture {
-    private var deviceID: AudioDeviceID = kAudioObjectUnknown
+    private(set) var deviceID: AudioDeviceID = kAudioObjectUnknown
     private var ioProcID: AudioDeviceIOProcID?
     private var isRunning = false
     private(set) var sampleRate: Float64 = 0

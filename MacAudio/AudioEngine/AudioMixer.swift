@@ -14,8 +14,36 @@ final class AudioMixer {
     private var micWritePos: Int = 0
     private var micReadPos: Int = 0
 
+    // Guards the converter Optional pointers below between the main thread
+    // (start/stop/live device switch) and the IO threads that load them in
+    // the delivery paths. Held only for the pointer load/store — never
+    // across convert(), which runs on a strong local so a concurrent swap
+    // can't free the instance mid-call. Deliberately separate from
+    // micBufferLock, which is held across the long buffering/mixing paths.
+    private var converterLock = os_unfair_lock()
     private var micConverter: SampleRateConverter?
     private var systemConverter: SampleRateConverter?
+
+    // Preallocated scratch pools for the realtime callbacks, sized to the
+    // worst case. Steady-state callbacks reuse them without any heap
+    // allocation; ensureScratchCapacity regrows only if a callback ever
+    // exceeds that (an IO cycle larger than the whole ring). Each pool is
+    // touched only by the single IO thread driving its source.
+    //
+    // The stereo pools only ever hold pre-resampling frames, so a full ring
+    // of interleaved stereo (AudioConstants.maxFrameSize) covers them. The
+    // resample/output pools can hold converter output, whose worst case is a
+    // full ring upsampled 44.1k→48k — the largest supported ratio — which
+    // EXCEEDS maxFrameSize; maxResampledSize covers it so the first full
+    // 44.1k callback doesn't allocate on the realtime thread.
+    private static let maxResampledFrames = Int(ceil(Double(AudioConstants.ringBufferFrames) * 48000.0 / 44100.0)) + 1
+    private static let maxResampledSize = maxResampledFrames * Int(AudioConstants.numChannels)
+    private var micStereoBuffer = [Float](repeating: 0, count: AudioConstants.maxFrameSize)
+    private var micResampledBuffer = [Float](repeating: 0, count: AudioMixer.maxResampledSize)
+    private var micOutputBuffer = [Float](repeating: 0, count: AudioMixer.maxResampledSize)
+    private var systemStereoBuffer = [Float](repeating: 0, count: AudioConstants.maxFrameSize)
+    private var systemResampledBuffer = [Float](repeating: 0, count: AudioMixer.maxResampledSize)
+    private var systemMixedBuffer = [Float](repeating: 0, count: AudioMixer.maxResampledSize)
 
     private(set) var isRunning = false
     private(set) var systemCaptureActive = false
@@ -63,14 +91,7 @@ final class AudioMixer {
             didStartMic = true
             logger.info("Mic capture started")
 
-        // Create mic sample rate converter if needed
-        let destRate = AudioConstants.defaultSampleRate
-        if micCapture.sampleRate > 0 && micCapture.sampleRate != destRate {
-            micConverter = SampleRateConverter(sourceRate: micCapture.sampleRate, destRate: destRate)
-            logger.info("Mic SRC: \(self.micCapture.sampleRate)Hz -> \(destRate)Hz")
-        } else {
-            micConverter = nil
-        }
+            rebuildMicConverter()
 
         do {
             try systemCapture.start()
@@ -78,18 +99,27 @@ final class AudioMixer {
             logger.info("System audio capture started")
             systemCaptureError = nil
 
-            // Create system audio sample rate converter if needed
+            // Create system audio sample rate converter if needed. Build it
+            // outside converterLock (AVAudioConverter allocation is slow),
+            // then swap the pointer under it.
+            let destRate = AudioConstants.defaultSampleRate
+            let newSystemConverter: SampleRateConverter?
             if systemCapture.sampleRate > 0 && systemCapture.sampleRate != destRate {
-                systemConverter = SampleRateConverter(sourceRate: systemCapture.sampleRate, destRate: destRate)
+                newSystemConverter = SampleRateConverter(sourceRate: systemCapture.sampleRate, destRate: destRate)
                 logger.info("System SRC: \(self.systemCapture.sampleRate)Hz -> \(destRate)Hz")
             } else {
-                systemConverter = nil
+                newSystemConverter = nil
             }
+            os_unfair_lock_lock(&converterLock)
+            systemConverter = newSystemConverter
+            os_unfair_lock_unlock(&converterLock)
         } catch {
             logger.error("System audio capture failed: \(error.localizedDescription)")
             systemCaptureActive = false
             systemCaptureError = error.localizedDescription
+            os_unfair_lock_lock(&converterLock)
             systemConverter = nil
+            os_unfair_lock_unlock(&converterLock)
             // Continue with mic only
         }
 
@@ -109,8 +139,10 @@ final class AudioMixer {
 
         micCapture.stop()
         systemCapture.stop()
+        os_unfair_lock_lock(&converterLock)
         micConverter = nil
         systemConverter = nil
+        os_unfair_lock_unlock(&converterLock)
         ringBufferWriter.close()
         logger.info("Audio mixer stopped")
     }
@@ -119,81 +151,155 @@ final class AudioMixer {
         ringBufferWriter.destroy()
     }
 
-    func setMicDevice(_ deviceID: AudioDeviceID) {
+    /// Returns nil on success, or an error message if a live switch failed
+    /// (the previously running device is restored in that case).
+    ///
+    /// When capture is running, the mic IOProc is cycled (stop → set device →
+    /// start) so the new device takes effect immediately; only the mic capture
+    /// is restarted — the ring buffer writer stays open and the shm mapping is
+    /// never torn down, and system capture, if active, keeps running. Runs on
+    /// the caller's thread (menu/MainActor), never the IO thread.
+    func setMicDevice(_ deviceID: AudioDeviceID) -> String? {
+        guard isRunning else {
+            micCapture.setInputDevice(deviceID)
+            return nil
+        }
+        guard deviceID != micCapture.deviceID else { return nil }
+
+        let previousDeviceID = micCapture.deviceID
+
+        micCapture.stop()
+        // Discard mic audio still buffered from the old device so it doesn't
+        // drain into the mix after the switch.
+        os_unfair_lock_lock(&micBufferLock)
+        micReadPos = micWritePos
+        os_unfair_lock_unlock(&micBufferLock)
+
         micCapture.setInputDevice(deviceID)
+        do {
+            try micCapture.start()
+            rebuildMicConverter()
+            logger.info("Mic device switched while running: \(previousDeviceID) -> \(deviceID)")
+            return nil
+        } catch {
+            logger.error("Mic switch to device \(deviceID) failed: \(error.localizedDescription), restoring device \(previousDeviceID)")
+            micCapture.setInputDevice(previousDeviceID)
+            do {
+                try micCapture.start()
+                rebuildMicConverter()
+            } catch {
+                logger.error("Mic restore to device \(previousDeviceID) failed: \(error.localizedDescription)")
+            }
+            return error.localizedDescription
+        }
+    }
+
+    /// Recreates the mic SRC for the capture's current sample rate. Called
+    /// from start() and after a live device switch — never from the IO thread.
+    /// The new converter is built outside converterLock (AVAudioConverter
+    /// allocation is slow); only the pointer swap takes the lock.
+    private func rebuildMicConverter() {
+        let destRate = AudioConstants.defaultSampleRate
+        let newConverter: SampleRateConverter?
+        if micCapture.sampleRate > 0 && micCapture.sampleRate != destRate {
+            newConverter = SampleRateConverter(sourceRate: micCapture.sampleRate, destRate: destRate)
+            logger.info("Mic SRC: \(self.micCapture.sampleRate)Hz -> \(destRate)Hz")
+        } else {
+            newConverter = nil
+        }
+        os_unfair_lock_lock(&converterLock)
+        micConverter = newConverter
+        os_unfair_lock_unlock(&converterLock)
     }
 
     // MARK: - Audio Callbacks
 
+    /// Regrows a scratch pool when a callback's required capacity exceeds it.
+    /// Contents are scratch — nothing is preserved across callbacks.
+    private func ensureScratchCapacity(_ buffer: inout [Float], _ needed: Int) {
+        if needed > buffer.count {
+            buffer = [Float](repeating: 0, count: needed)
+        }
+    }
+
     private func handleMicAudio(_ floatPtr: UnsafePointer<Float>, frameCount: UInt32, channelCount: Int) {
-        var frames = Int(frameCount)
+        let frames = Int(frameCount)
+        guard frames > 0 else { return }
         let outChannels = Int(AudioConstants.numChannels)
 
-        // Step 1: Upmix mono to stereo if needed, producing interleaved stereo buffer
-        var stereoBuffer: [Float]?
-        var stereoPtr: UnsafePointer<Float> = floatPtr
-
-        if channelCount < outChannels {
-            // Mono -> stereo upmix
-            var buf = [Float](repeating: 0, count: frames * outChannels)
-            for frame in 0..<frames {
-                let sample = floatPtr[frame]
-                buf[frame * outChannels] = sample
-                buf[frame * outChannels + 1] = sample
-            }
-            stereoBuffer = buf
-        } else if channelCount > outChannels {
-            // Downmix to stereo (take first 2 channels)
-            var buf = [Float](repeating: 0, count: frames * outChannels)
-            for frame in 0..<frames {
-                for ch in 0..<outChannels {
-                    buf[frame * outChannels + ch] = floatPtr[frame * channelCount + ch]
-                }
-            }
-            stereoBuffer = buf
-        }
-        // If channelCount == outChannels, use floatPtr directly
-
-        // Step 2: Resample if converter exists
-        var finalFrameCount = UInt32(frames)
-        if let converter = micConverter {
-            let srcPtr: UnsafePointer<Float>
-            if let buf = stereoBuffer {
-                srcPtr = buf.withUnsafeBufferPointer { $0.baseAddress! }
-            } else {
-                srcPtr = floatPtr
-            }
-            // Convert into a caller-owned buffer so no internal pointer escapes
-            // the converter. Capacity for the worst-case upsample of this input.
-            let ratio = converter.outputRate / converter.inputRate
-            let maxOutFrames = Int(ceil(Double(frames) * ratio)) + 1
-            var resampled = [Float](repeating: 0, count: maxOutFrames * outChannels)
-            let written = resampled.withUnsafeMutableBufferPointer { outPtr -> UInt32 in
-                converter.convert(srcPtr, frameCount: UInt32(frames),
-                                   into: outPtr.baseAddress!,
-                                   outputCapacity: UInt32(maxOutFrames * outChannels))
-            }
-            if written > 0 {
-                finalFrameCount = written
-                frames = Int(written)
-                stereoBuffer = resampled // carry ownership through the closures below
-            }
-        } else if let buf = stereoBuffer {
-            // No converter, but we have a stereo buffer from upmix
-            // We need to keep stereoBuffer alive and point stereoPtr to it
-            // Handle below in the closures
+        // Step 1: Upmix/downmix to interleaved stereo in the reusable scratch
+        // buffer when the channel count differs; use the input pointer
+        // directly when it already matches.
+        if channelCount == outChannels {
+            micResampleAndDeliver(floatPtr, frames)
+            return
         }
 
-        // Helper to get the final pointer
-        let writeFrames = { [stereoBuffer] (body: (UnsafePointer<Float>, Int) -> Void) in
-            if let buf = stereoBuffer {
-                buf.withUnsafeBufferPointer { bufPtr in
-                    body(bufPtr.baseAddress!, frames)
+        ensureScratchCapacity(&micStereoBuffer, frames * outChannels)
+        micStereoBuffer.withUnsafeMutableBufferPointer { stereo in
+            guard let stereoBase = stereo.baseAddress else { return }
+            if channelCount < outChannels {
+                // Mono -> stereo upmix
+                for frame in 0..<frames {
+                    let sample = floatPtr[frame]
+                    stereoBase[frame * outChannels] = sample
+                    stereoBase[frame * outChannels + 1] = sample
                 }
             } else {
-                body(stereoPtr, frames)
+                // Downmix to stereo (take first 2 channels)
+                for frame in 0..<frames {
+                    for ch in 0..<outChannels {
+                        stereoBase[frame * outChannels + ch] = floatPtr[frame * channelCount + ch]
+                    }
+                }
             }
+            micResampleAndDeliver(stereoBase, frames)
         }
+    }
+
+    /// Step 2 of the mic path: resample to the destination rate (if needed).
+    /// `ptr` is only read for the duration of this call.
+    private func micResampleAndDeliver(_ ptr: UnsafePointer<Float>, _ frames: Int) {
+        let outChannels = Int(AudioConstants.numChannels)
+
+        // Load the pointer under converterLock, then convert on the local
+        // strong ref — the main thread may swap micConverter concurrently
+        // (live device switch). Never hold the lock across convert().
+        os_unfair_lock_lock(&converterLock)
+        let loadedConverter = micConverter
+        os_unfair_lock_unlock(&converterLock)
+
+        guard let converter = loadedConverter else {
+            micDeliver(ptr, frames)
+            return
+        }
+
+        // Convert into a reusable scratch buffer so no internal pointer
+        // escapes the converter. Capacity for the worst-case upsample of this
+        // input.
+        let ratio = converter.outputRate / converter.inputRate
+        let maxOutFrames = Int(ceil(Double(frames) * ratio)) + 1
+        ensureScratchCapacity(&micResampledBuffer, maxOutFrames * outChannels)
+        let written = micResampledBuffer.withUnsafeMutableBufferPointer { out -> UInt32 in
+            converter.convert(ptr, frameCount: UInt32(frames),
+                              into: out.baseAddress!,
+                              outputCapacity: UInt32(maxOutFrames * outChannels))
+        }
+        if written > 0 {
+            micResampledBuffer.withUnsafeBufferPointer { out in
+                micDeliver(out.baseAddress!, Int(written))
+            }
+        } else {
+            // Conversion produced nothing — deliver the pre-conversion audio
+            // rather than dropping the callback.
+            micDeliver(ptr, frames)
+        }
+    }
+
+    /// Step 3 of the mic path: buffer for mixing in the system callback, or
+    /// gain + clip + write in mic-only mode.
+    private func micDeliver(_ ptr: UnsafePointer<Float>, _ frameCount: Int) {
+        let outChannels = Int(AudioConstants.numChannels)
 
         if systemCaptureActive {
             // Buffer mic audio for mixing in the system audio callback
@@ -202,36 +308,31 @@ final class AudioMixer {
             os_unfair_lock_lock(&micBufferLock)
             defer { os_unfair_lock_unlock(&micBufferLock) }
 
-            writeFrames { ptr, frameCount in
-                for frame in 0..<frameCount {
-                    let writeIdx = (self.micWritePos + frame * outChannels) % bufferCapacity
-                    for ch in 0..<outChannels {
-                        self.micBuffer[(writeIdx + ch) % bufferCapacity] = ptr[frame * outChannels + ch]
-                    }
+            for frame in 0..<frameCount {
+                let writeIdx = (micWritePos + frame * outChannels) % bufferCapacity
+                for ch in 0..<outChannels {
+                    micBuffer[(writeIdx + ch) % bufferCapacity] = ptr[frame * outChannels + ch]
                 }
-                self.micWritePos = (self.micWritePos + frameCount * outChannels) % bufferCapacity
             }
+            micWritePos = (micWritePos + frameCount * outChannels) % bufferCapacity
         } else {
             // Mic-only mode: apply gain, clip, and write directly to ring buffer
             let gain = self.micGain
 
-            writeFrames { ptr, frameCount in
-                var outputBuffer = [Float](repeating: 0, count: frameCount * outChannels)
+            ensureScratchCapacity(&micOutputBuffer, frameCount * outChannels)
+            micOutputBuffer.withUnsafeMutableBufferPointer { out in
+                guard let outBase = out.baseAddress else { return }
                 for i in 0..<(frameCount * outChannels) {
-                    outputBuffer[i] = max(-1.0, min(1.0, ptr[i] * gain))
+                    outBase[i] = max(-1.0, min(1.0, ptr[i] * gain))
                 }
-                outputBuffer.withUnsafeBufferPointer { bufPtr in
-                    if let base = bufPtr.baseAddress {
-                        self.ringBufferWriter.write(frames: base, frameCount: UInt32(frameCount))
-                    }
-                }
+                self.ringBufferWriter.write(frames: outBase, frameCount: UInt32(frameCount))
             }
         }
     }
 
     private func handleSystemAudio(_ bufferList: UnsafePointer<AudioBufferList>, frameCount: UInt32) {
         let channels = Int(AudioConstants.numChannels)
-        var frames = Int(frameCount)
+        let frames = Int(frameCount)
         guard frames > 0 else { return }
 
         // Extract system audio as interleaved stereo
@@ -244,100 +345,115 @@ final class AudioMixer {
         let sysFloats = data.assumingMemoryBound(to: Float.self)
         let sysChannels = Int(firstBuffer.mNumberChannels)
 
-        // Prepare stereo interleaved pointer for potential resampling
-        var stereoBuffer: [Float]?
-        var sysPtr: UnsafePointer<Float> = UnsafePointer(sysFloats)
+        // Upmix/downmix to interleaved stereo in the reusable scratch buffer
+        // when the channel count differs; use the tap buffer directly when it
+        // matches.
+        if sysChannels == channels {
+            systemResampleAndMix(UnsafePointer(sysFloats), frames)
+            return
+        }
 
-        if sysChannels < channels {
-            // Mono -> stereo upmix
-            var buf = [Float](repeating: 0, count: frames * channels)
-            for frame in 0..<frames {
-                let sample = sysFloats[frame]
-                buf[frame * channels] = sample
-                buf[frame * channels + 1] = sample
-            }
-            stereoBuffer = buf
-        } else if sysChannels > channels {
-            // Downmix: take first 2 channels
-            var buf = [Float](repeating: 0, count: frames * channels)
-            for frame in 0..<frames {
-                for ch in 0..<channels {
-                    buf[frame * channels + ch] = sysFloats[frame * sysChannels + ch]
+        ensureScratchCapacity(&systemStereoBuffer, frames * channels)
+        systemStereoBuffer.withUnsafeMutableBufferPointer { stereo in
+            guard let stereoBase = stereo.baseAddress else { return }
+            if sysChannels < channels {
+                // Mono -> stereo upmix
+                for frame in 0..<frames {
+                    let sample = sysFloats[frame]
+                    stereoBase[frame * channels] = sample
+                    stereoBase[frame * channels + 1] = sample
+                }
+            } else {
+                // Downmix: take first 2 channels
+                for frame in 0..<frames {
+                    for ch in 0..<channels {
+                        stereoBase[frame * channels + ch] = sysFloats[frame * sysChannels + ch]
+                    }
                 }
             }
-            stereoBuffer = buf
+            systemResampleAndMix(stereoBase, frames)
         }
-        // If sysChannels == channels, use sysFloats directly
+    }
 
-        // Resample if converter exists
-        var finalFrameCount = UInt32(frames)
-        if let converter = systemConverter {
-            let srcPtr: UnsafePointer<Float>
-            if let buf = stereoBuffer {
-                srcPtr = buf.withUnsafeBufferPointer { $0.baseAddress! }
-            } else {
-                srcPtr = UnsafePointer(sysFloats)
-            }
-            // Convert into a caller-owned buffer so no internal pointer escapes
-            // the converter.
-            let ratio = converter.outputRate / converter.inputRate
-            let maxOutFrames = Int(ceil(Double(frames) * ratio)) + 1
-            var resampled = [Float](repeating: 0, count: maxOutFrames * channels)
-            let written = resampled.withUnsafeMutableBufferPointer { outPtr -> UInt32 in
-                converter.convert(srcPtr, frameCount: UInt32(frames),
-                                   into: outPtr.baseAddress!,
-                                   outputCapacity: UInt32(maxOutFrames * channels))
-            }
-            if written > 0 {
-                finalFrameCount = written
-                frames = Int(written)
-                stereoBuffer = resampled
-            }
+    /// Resamples to the destination rate (if needed), then mixes and writes.
+    /// `ptr` is only read for the duration of this call.
+    private func systemResampleAndMix(_ ptr: UnsafePointer<Float>, _ frames: Int) {
+        let channels = Int(AudioConstants.numChannels)
+
+        // Load the pointer under converterLock, then convert on the local
+        // strong ref — the main thread may swap systemConverter concurrently
+        // (start/stop). Never hold the lock across convert().
+        os_unfair_lock_lock(&converterLock)
+        let loadedConverter = systemConverter
+        os_unfair_lock_unlock(&converterLock)
+
+        guard let converter = loadedConverter else {
+            systemMixAndWrite(ptr, frames)
+            return
         }
+
+        // Convert into a reusable scratch buffer so no internal pointer
+        // escapes the converter.
+        let ratio = converter.outputRate / converter.inputRate
+        let maxOutFrames = Int(ceil(Double(frames) * ratio)) + 1
+        ensureScratchCapacity(&systemResampledBuffer, maxOutFrames * channels)
+        let written = systemResampledBuffer.withUnsafeMutableBufferPointer { out -> UInt32 in
+            converter.convert(ptr, frameCount: UInt32(frames),
+                              into: out.baseAddress!,
+                              outputCapacity: UInt32(maxOutFrames * channels))
+        }
+        if written > 0 {
+            systemResampledBuffer.withUnsafeBufferPointer { out in
+                systemMixAndWrite(out.baseAddress!, Int(written))
+            }
+        } else {
+            // Conversion produced nothing — mix the pre-conversion audio
+            // rather than dropping the callback.
+            systemMixAndWrite(ptr, frames)
+        }
+    }
+
+    /// Mixes system audio with the buffered mic audio, hard-clips, and writes
+    /// to the shared ring buffer.
+    private func systemMixAndWrite(_ sysPtr: UnsafePointer<Float>, _ frameCount: Int) {
+        let channels = Int(AudioConstants.numChannels)
 
         // Build mixing buffer with system audio + gain
         let sysGain = self.systemGain
-        var mixedBuffer = [Float](repeating: 0, count: frames * channels)
+        ensureScratchCapacity(&systemMixedBuffer, frameCount * channels)
 
-        if let buf = stereoBuffer {
-            for i in 0..<(frames * channels) {
-                mixedBuffer[i] = buf[i] * sysGain
+        systemMixedBuffer.withUnsafeMutableBufferPointer { mixed in
+            guard let mixedBase = mixed.baseAddress else { return }
+            for i in 0..<(frameCount * channels) {
+                mixedBase[i] = sysPtr[i] * sysGain
             }
-        } else {
-            for i in 0..<(frames * channels) {
-                mixedBuffer[i] = sysPtr[i] * sysGain
+
+            // Read mic audio and mix in
+            os_unfair_lock_lock(&micBufferLock)
+            let micGainVal = self.micGain
+            let bufferCapacity = micBuffer.count
+            let available: Int
+            if micWritePos >= micReadPos {
+                available = micWritePos - micReadPos
+            } else {
+                available = bufferCapacity - micReadPos + micWritePos
             }
-        }
+            let samplesToRead = min(available, frameCount * channels)
 
-        // Read mic audio and mix in
-        os_unfair_lock_lock(&micBufferLock)
-        let micGainVal = self.micGain
-        let bufferCapacity = micBuffer.count
-        let available: Int
-        if micWritePos >= micReadPos {
-            available = micWritePos - micReadPos
-        } else {
-            available = bufferCapacity - micReadPos + micWritePos
-        }
-        let samplesToRead = min(available, frames * channels)
-
-        for i in 0..<samplesToRead {
-            let readIdx = (micReadPos + i) % bufferCapacity
-            mixedBuffer[i] += micBuffer[readIdx] * micGainVal
-        }
-        micReadPos = (micReadPos + samplesToRead) % bufferCapacity
-        os_unfair_lock_unlock(&micBufferLock)
-
-        // Hard clip
-        for i in 0..<mixedBuffer.count {
-            mixedBuffer[i] = max(-1.0, min(1.0, mixedBuffer[i]))
-        }
-
-        // Write to shared ring buffer
-        mixedBuffer.withUnsafeBufferPointer { bufPtr in
-            if let base = bufPtr.baseAddress {
-                ringBufferWriter.write(frames: base, frameCount: finalFrameCount)
+            for i in 0..<samplesToRead {
+                let readIdx = (micReadPos + i) % bufferCapacity
+                mixedBase[i] += micBuffer[readIdx] * micGainVal
             }
+            micReadPos = (micReadPos + samplesToRead) % bufferCapacity
+            os_unfair_lock_unlock(&micBufferLock)
+
+            // Hard clip
+            for i in 0..<(frameCount * channels) {
+                mixedBase[i] = max(-1.0, min(1.0, mixedBase[i]))
+            }
+
+            // Write to shared ring buffer
+            self.ringBufferWriter.write(frames: mixedBase, frameCount: UInt32(frameCount))
         }
     }
 

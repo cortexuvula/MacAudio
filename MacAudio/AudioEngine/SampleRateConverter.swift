@@ -20,8 +20,13 @@ final class SampleRateConverter {
 
     /// Returns nil if sourceRate == destRate (no conversion needed).
     /// Configured for interleaved stereo Float32.
+    ///
+    /// `maxFrames` preallocates the internal PCM buffers; it defaults to the
+    /// ring buffer frame count (the worst-case callback size) so steady-state
+    /// conversions don't allocate on the realtime thread. The buffers regrow
+    /// if a call ever exceeds it.
     init?(sourceRate: Float64, destRate: Float64, channels: UInt32 = 2,
-          maxFrames: AVAudioFrameCount = 4096) {
+          maxFrames: AVAudioFrameCount = AudioConstants.ringBufferFrames) {
         guard sourceRate != destRate else { return nil }
 
         guard let inFmt = AVAudioFormat(commonFormat: .pcmFormatFloat32,
