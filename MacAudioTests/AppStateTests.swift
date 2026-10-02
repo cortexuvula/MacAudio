@@ -13,6 +13,10 @@ private final class MockAudioMixer: AudioMixing {
     private(set) var destroySharedMemoryCallCount = 0
     /// When non-nil, setMicDevice reports a live-switch failure with this message.
     var stubbedSwitchError: String?
+    /// What the mixer reports after a stubbed failure. Defaults to true — a
+    /// single-failure switch leaves the mixer running; set false to simulate
+    /// the double-failure emergency stop where AudioMixer stops itself.
+    var isRunning = true
 
     func start(micDeviceID: AudioDeviceID?) throws {}
 
@@ -33,7 +37,8 @@ private final class MockAudioMixer: AudioMixing {
 /// updateMicDevice is a revert state machine: when the mixer reports a failed
 /// live switch (having restored the previous device itself), the menu must
 /// point back at the device that is actually capturing; on success the new
-/// selection sticks and lastError is untouched.
+/// selection sticks and lastError is untouched. A double failure (the restore
+/// also threw) leaves the mixer stopped, and the menu must say so.
 final class AppStateMicDeviceSwitchTests: XCTestCase {
     private let oldDevice = AudioDevice(id: 100, name: "Old Mic", uid: "old-mic-uid")
     private let newDevice = AudioDevice(id: 200, name: "New Mic", uid: "new-mic-uid")
@@ -69,6 +74,10 @@ final class AppStateMicDeviceSwitchTests: XCTestCase {
         state.selectedMicDeviceID = oldDevice.id
         state.preferredMicUID = oldDevice.uid
         state.lastError = nil
+        // Capture is live; the mock defaults to isRunning == true, modeling a
+        // single failure where the mixer restored the previous device.
+        state.isActive = true
+        state.captureStatus = .micOnly
 
         state.updateMicDevice(newDevice.id)
 
@@ -80,10 +89,47 @@ final class AppStateMicDeviceSwitchTests: XCTestCase {
                        "UID preference must revert to the device that is still capturing")
         XCTAssertEqual(state.lastError, "switch failed",
                        "the switch failure must surface to the user")
+        XCTAssertTrue(state.isActive,
+                      "a single-failure switch keeps capture live")
+        XCTAssertEqual(state.captureStatus, .micOnly,
+                       "a single-failure switch keeps the capture status untouched")
         XCTAssertEqual(defaults.integer(forKey: "selectedMicDeviceID"), Int(oldDevice.id),
                        "savePreferences must persist the reverted device selection")
         XCTAssertEqual(defaults.string(forKey: "selectedMicDeviceUID"), oldDevice.uid,
                        "savePreferences must persist the reverted device UID preference")
+    }
+
+    /// Double failure: the switch AND the restore start() threw, so the mixer
+    /// emergency-stopped itself (isRunning == false). Beyond the usual revert,
+    /// the menu must stop claiming capture is live.
+    @MainActor
+    func test_updateMicDevice_marks_capture_stopped_when_double_failure_stops_mixer() throws {
+        let mixer = MockAudioMixer()
+        mixer.stubbedSwitchError = "switch and restore failed — mixer stopped"
+        mixer.isRunning = false
+        let defaults = try makeIsolatedDefaults()
+        let state = AppState(audioMixer: mixer, defaults: defaults)
+        state.availableMicDevices = [oldDevice, newDevice]
+        state.selectedMicDeviceID = oldDevice.id
+        state.preferredMicUID = oldDevice.uid
+        state.lastError = nil
+        state.isActive = true
+        state.captureStatus = .both
+
+        state.updateMicDevice(newDevice.id)
+
+        XCTAssertEqual(mixer.setMicDeviceCalls, [newDevice.id],
+                       "the mixer must be asked to switch to the new device")
+        XCTAssertEqual(state.selectedMicDeviceID, oldDevice.id,
+                       "selection must still revert to the previous device")
+        XCTAssertEqual(state.preferredMicUID, oldDevice.uid,
+                       "UID preference must still revert to the previous device")
+        XCTAssertEqual(state.lastError, "switch and restore failed — mixer stopped",
+                       "the double failure must surface to the user")
+        XCTAssertFalse(state.isActive,
+                       "the menu must not claim capture is live after the mixer's emergency stop")
+        XCTAssertEqual(state.captureStatus, .stopped,
+                       "capture status must reflect the mixer's stopped state")
     }
 
     @MainActor

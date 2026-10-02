@@ -5,6 +5,7 @@ import os
 /// Seam over AudioMixer covering the members AppState drives a mixer through,
 /// so the menu state machine can be tested against a mock.
 protocol AudioMixing: AnyObject {
+    var isRunning: Bool { get }
     var micGain: Float { get set }
     var systemGain: Float { get set }
     func start(micDeviceID: AudioDeviceID?) throws

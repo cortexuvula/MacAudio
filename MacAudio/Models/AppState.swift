@@ -122,13 +122,23 @@ final class AppState: ObservableObject {
         selectedMicDeviceID = deviceID
         // Remember by UID so a brief unplug doesn't lose the user's preference.
         preferredMicUID = availableMicDevices.first(where: { $0.id == deviceID })?.uid
-        if let switchError = audioMixer?.setMicDevice(deviceID) {
-            // Live switch failed and the mixer restored the previous device;
-            // point the menu back at the device that is actually capturing.
+        if let mixer = audioMixer, let switchError = mixer.setMicDevice(deviceID) {
+            // Live switch failed; point the menu back at the previous device —
+            // on a single failure the mixer restored it, so it is the device
+            // still capturing.
             selectedMicDeviceID = previousDeviceID
             preferredMicUID = availableMicDevices.first(where: { $0.id == previousDeviceID })?.uid
             lastError = switchError
-            logger.error("Mic device switch failed, keeping device \(previousDeviceID): \(switchError)")
+            if !mixer.isRunning {
+                // Double failure: the restore also threw and the mixer stopped
+                // itself, so capture is down — sync the menu instead of
+                // leaving it claiming capture is live.
+                isActive = false
+                captureStatus = .stopped
+                logger.error("Mic switch double failure stopped the mixer; capture marked stopped: \(switchError)")
+            } else {
+                logger.error("Mic device switch failed, keeping device \(previousDeviceID): \(switchError)")
+            }
         }
         savePreferences()
     }
