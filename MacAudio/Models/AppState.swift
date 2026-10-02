@@ -135,6 +135,11 @@ final class AppState: ObservableObject {
                 // leaving it claiming capture is live.
                 isActive = false
                 captureStatus = .stopped
+                // The stopped mixer is intentionally retained rather than
+                // nil'd: if the user quits now without restarting capture,
+                // cleanupForTermination's destroySharedMemory must still
+                // reach the ring buffer's shared-memory segment. The next
+                // successful startAudio replaces it with a fresh AudioMixer.
                 logger.error("Mic switch double failure stopped the mixer; capture marked stopped: \(switchError)")
             } else {
                 logger.error("Mic device switch failed, keeping device \(previousDeviceID): \(switchError)")

@@ -18,9 +18,12 @@ private final class MockAudioMixer: AudioMixing {
     /// the double-failure emergency stop where AudioMixer stops itself.
     var isRunning = true
 
-    func start(micDeviceID: AudioDeviceID?) throws {}
+    func start(micDeviceID: AudioDeviceID?) throws {
+        isRunning = true
+    }
 
     func stop() {
+        isRunning = false
         stopCallCount += 1
     }
 
@@ -130,6 +133,35 @@ final class AppStateMicDeviceSwitchTests: XCTestCase {
                        "the menu must not claim capture is live after the mixer's emergency stop")
         XCTAssertEqual(state.captureStatus, .stopped,
                        "capture status must reflect the mixer's stopped state")
+    }
+
+    /// A double failure must not orphan the ring buffer's shared-memory
+    /// segment: the stopped mixer stays installed in AppState, so quitting
+    /// without restarting still routes termination cleanup through it
+    /// (nil-assigning the mixer here would drop the destroySharedMemory call
+    /// and leak the segment).
+    @MainActor
+    func test_updateMicDevice_double_failure_still_destroys_shared_memory_on_termination() throws {
+        let mixer = MockAudioMixer()
+        mixer.stubbedSwitchError = "switch and restore failed — mixer stopped"
+        mixer.isRunning = false
+        let defaults = try makeIsolatedDefaults()
+        let state = AppState(audioMixer: mixer, defaults: defaults)
+        state.availableMicDevices = [oldDevice, newDevice]
+        state.selectedMicDeviceID = oldDevice.id
+        state.isActive = true
+
+        state.updateMicDevice(newDevice.id)
+
+        XCTAssertFalse(state.isActive,
+                       "precondition: the double failure must have stopped capture")
+
+        state.cleanupForTermination()
+
+        XCTAssertEqual(mixer.destroySharedMemoryCallCount, 1,
+                       "termination cleanup must reach the retained mixer's destroySharedMemory")
+        XCTAssertEqual(mixer.stopCallCount, 1,
+                       "termination cleanup must route through the retained mixer")
     }
 
     @MainActor
