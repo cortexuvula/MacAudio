@@ -4,7 +4,7 @@ import os
 
 /// Seam over AudioMixer covering the members AppState drives a mixer through,
 /// so the menu state machine can be tested against a mock.
-protocol AudioMixering: AnyObject {
+protocol AudioMixing: AnyObject {
     var micGain: Float { get set }
     var systemGain: Float { get set }
     func start(micDeviceID: AudioDeviceID?) throws
@@ -24,7 +24,7 @@ protocol SystemAudioCapturing: AnyObject {
 
 extension SystemAudioCapture: SystemAudioCapturing {}
 
-final class AudioMixer: AudioMixering {
+final class AudioMixer: AudioMixing {
     private let micCapture: MicCapturing
     private let systemCapture: SystemAudioCapturing
     private let ringBufferWriter: RingBufferWriting
@@ -184,7 +184,10 @@ final class AudioMixer: AudioMixering {
     }
 
     /// Returns nil on success, or an error message if a live switch failed
-    /// (the previously running device is restored in that case).
+    /// (the previously running device is restored in that case). If the
+    /// restore of the previous device also fails, the mixer stops itself —
+    /// the mic IOProc is dead on both devices and a "running" mixer would
+    /// capture silence — and the returned error reports the double failure.
     ///
     /// When capture is running, the mic IOProc is cycled (stop → set device →
     /// start) so the new device takes effect immediately; only the mic capture
@@ -214,15 +217,22 @@ final class AudioMixer: AudioMixering {
             logger.info("Mic device switched while running: \(previousDeviceID) -> \(deviceID)")
             return nil
         } catch {
-            logger.error("Mic switch to device \(deviceID) failed: \(error.localizedDescription), restoring device \(previousDeviceID)")
+            let switchErrorMessage = error.localizedDescription
+            logger.error("Mic switch to device \(deviceID) failed: \(switchErrorMessage), restoring device \(previousDeviceID)")
             micCapture.setInputDevice(previousDeviceID)
             do {
                 try micCapture.start()
                 rebuildMicConverter()
             } catch {
-                logger.error("Mic restore to device \(previousDeviceID) failed: \(error.localizedDescription)")
+                logger.error("Mic restore to device \(previousDeviceID) failed: \(error.localizedDescription); stopping mixer")
+                // Both the switch and the restore failed, so the mic IOProc is
+                // dead on both devices. Stop the mixer so the UI is honest
+                // about capture being down instead of showing a "running"
+                // mixer that captures silence.
+                stop()
+                return "Mic capture failed after device switch (\(switchErrorMessage)); previous device \(previousDeviceID) could not be restarted — mixer stopped"
             }
-            return error.localizedDescription
+            return switchErrorMessage
         }
     }
 

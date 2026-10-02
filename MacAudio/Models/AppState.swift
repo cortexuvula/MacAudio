@@ -34,8 +34,12 @@ final class AppState: ObservableObject {
     @Published var isSetupComplete = false
     @Published var launchAtLogin = false
     @Published var autoStartCapture = false
-    private var audioMixer: AudioMixering?
+    private var audioMixer: AudioMixing?
     private var deviceChangeListener: AudioObjectPropertyListenerBlock?
+    /// Defaults domain the app state persists to. Production uses
+    /// UserDefaults.standard; tests inject an isolated suite so a crash
+    /// mid-test can't leave the host's real preferences mutated.
+    private let defaults: UserDefaults
     private let logger = Logger(subsystem: "com.macaudio.app", category: "state")
 
     private static let micVolumeKey = "micVolume"
@@ -56,10 +60,12 @@ final class AppState: ObservableObject {
     /// hit (nil → non-nil-but-wrong between the two reads).
     private var didLoadAutoStartFromPlist = false
 
-    /// Production callers use the default (no mixer until startAudio builds
-    /// one); tests inject a mock behind the AudioMixering seam.
-    init(audioMixer: AudioMixering? = nil) {
+    /// Production callers use the defaults (no mixer until startAudio builds
+    /// one, preferences in UserDefaults.standard); tests inject a mock behind
+    /// the AudioMixing seam and an isolated UserDefaults suite.
+    init(audioMixer: AudioMixing? = nil, defaults: UserDefaults = UserDefaults.standard) {
         self.audioMixer = audioMixer
+        self.defaults = defaults
         loadPreferences()
 
         Task.detached {
@@ -241,8 +247,8 @@ final class AppState: ObservableObject {
         // from a previous session) — overwriting the correct plist value.
         // On retries (cfprefsd had more time to sync), the refresh is safe.
         if !didLoadAutoStartFromPlist || retriesRemaining < Self.autoStartMaxRetries {
-            if UserDefaults.standard.object(forKey: Self.autoStartCaptureKey) != nil {
-                let liveValue = UserDefaults.standard.bool(forKey: Self.autoStartCaptureKey)
+            if defaults.object(forKey: Self.autoStartCaptureKey) != nil {
+                let liveValue = defaults.bool(forKey: Self.autoStartCaptureKey)
                 if autoStartCapture != liveValue {
                     logger.notice("Auto-start: pref refreshed from disk (in-memory=\(self.autoStartCapture) → live=\(liveValue))")
                     autoStartCapture = liveValue
@@ -397,11 +403,11 @@ final class AppState: ObservableObject {
     }
 
     private func savePreferences() {
-        UserDefaults.standard.set(micVolume, forKey: Self.micVolumeKey)
-        UserDefaults.standard.set(systemVolume, forKey: Self.systemVolumeKey)
-        UserDefaults.standard.set(selectedMicDeviceID, forKey: Self.selectedMicDeviceIDKey)
+        defaults.set(micVolume, forKey: Self.micVolumeKey)
+        defaults.set(systemVolume, forKey: Self.systemVolumeKey)
+        defaults.set(selectedMicDeviceID, forKey: Self.selectedMicDeviceIDKey)
         if let uid = preferredMicUID {
-            UserDefaults.standard.set(uid, forKey: Self.selectedMicDeviceUIDKey)
+            defaults.set(uid, forKey: Self.selectedMicDeviceUIDKey)
         }
         // NOTE: autoStartCapture is intentionally NOT saved here.
         // savePreferences() is called from didSet observers (volume changes)
@@ -416,23 +422,23 @@ final class AppState: ObservableObject {
     /// in-memory value is guaranteed to reflect the user's intent (not a
     /// stale cfprefsd cache hit from login).
     private func saveAutoStartPreference() {
-        UserDefaults.standard.set(autoStartCapture, forKey: Self.autoStartCaptureKey)
-        UserDefaults.standard.synchronize()
+        defaults.set(autoStartCapture, forKey: Self.autoStartCaptureKey)
+        defaults.synchronize()
     }
 
     private func loadPreferences() {
-        if UserDefaults.standard.object(forKey: Self.micVolumeKey) != nil {
-            micVolume = UserDefaults.standard.float(forKey: Self.micVolumeKey)
+        if defaults.object(forKey: Self.micVolumeKey) != nil {
+            micVolume = defaults.float(forKey: Self.micVolumeKey)
         }
-        if UserDefaults.standard.object(forKey: Self.systemVolumeKey) != nil {
-            systemVolume = UserDefaults.standard.float(forKey: Self.systemVolumeKey)
+        if defaults.object(forKey: Self.systemVolumeKey) != nil {
+            systemVolume = defaults.float(forKey: Self.systemVolumeKey)
         }
-        let savedDeviceID = UserDefaults.standard.integer(forKey: Self.selectedMicDeviceIDKey)
+        let savedDeviceID = defaults.integer(forKey: Self.selectedMicDeviceIDKey)
         if savedDeviceID != 0 {
             selectedMicDeviceID = AudioDeviceID(savedDeviceID)
         }
-        preferredMicUID = UserDefaults.standard.string(forKey: Self.selectedMicDeviceUIDKey)
-        autoStartCapture = UserDefaults.standard.boolIfPresent(
+        preferredMicUID = defaults.string(forKey: Self.selectedMicDeviceUIDKey)
+        autoStartCapture = defaults.boolIfPresent(
             forKey: Self.autoStartCaptureKey, default: autoStartCapture)
 
         // The plist file is the most trustworthy source — it's written by
@@ -446,7 +452,7 @@ final class AppState: ObservableObject {
                 autoStartCapture = plistValue
                 didLoadAutoStartFromPlist = true
             }
-        } else if UserDefaults.standard.object(forKey: Self.autoStartCaptureKey) == nil {
+        } else if defaults.object(forKey: Self.autoStartCaptureKey) == nil {
             // cfprefsd returned nil AND no plist file — keep the default (false)
         }
     }
