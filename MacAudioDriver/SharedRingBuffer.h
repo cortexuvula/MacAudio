@@ -49,6 +49,12 @@ void SharedRingBuffer_Write(SharedRingBuffer* rb, const float* frames, uint32_t 
 // Reader accessors (used by the AudioServerPlugin)
 uint32_t SharedRingBuffer_GetActive(SharedRingBuffer* rb);
 uint32_t SharedRingBuffer_GetSampleRate(SharedRingBuffer* rb);
+// Generation of the segment: incremented on every writer-ownership
+// acquisition (fresh acquire, re-acquire, or dead-owner takeover — including
+// teardown's final acquire just before unlink). A reader that caches the
+// value and compares on later reads detects that the writer side was
+// replaced, even when the reader is still mapped to the unlinked old inode.
+uint32_t SharedRingBuffer_GetEpoch(SharedRingBuffer* rb);
 uint64_t SharedRingBuffer_GetReadHead(SharedRingBuffer* rb);
 uint64_t SharedRingBuffer_Read(SharedRingBuffer* rb, float* outBuffer, uint32_t frameCount);
 

@@ -725,6 +725,121 @@ static void test_reader_receives_new_data_across_writer_close_reopen(void) {
     SharedRingBuffer_Destroy();
 }
 
+/* ---------- Epoch / Segment Reconnection (R1) ---------- */
+
+/* The epoch must increment on EVERY writer-ownership acquisition: fresh
+ * acquire, same-process re-acquire, release→re-acquire, and dead-owner
+ * takeover. The driver's reconnection logic keys off these transitions. */
+static void test_epoch_increments_across_ownership_transitions(void) {
+    shm_unlink(kSHM_Name);
+
+    /* Fresh acquire. */
+    SharedRingBuffer* w = SharedRingBuffer_CreateOrOpen(1);
+    assert(w != NULL);
+    uint32_t e0 = SharedRingBuffer_GetEpoch(w);
+    assert(e0 >= 1);
+
+    /* Same-process re-acquire (Stop→Start in one app, no release). */
+    SharedRingBuffer* w2 = SharedRingBuffer_CreateOrOpen(1);
+    assert(w2 != NULL);
+    assert(SharedRingBuffer_GetEpoch(w2) == e0 + 1);
+    SharedRingBuffer_Close(w2);
+
+    /* Release → fresh acquire. */
+    SharedRingBuffer_ReleaseWriterOwnership(w);
+    SharedRingBuffer_Close(w);
+    SharedRingBuffer* w3 = SharedRingBuffer_CreateOrOpen(1);
+    assert(w3 != NULL);
+    assert(SharedRingBuffer_GetEpoch(w3) == e0 + 2);
+
+    /* Dead-owner takeover: a child acquires (one more bump) then exits
+     * without releasing; the parent's next writer-open takes over (another
+     * bump). */
+    SharedRingBuffer_ReleaseWriterOwnership(w3);
+    SharedRingBuffer_Close(w3);
+    pid_t pid = fork();
+    assert(pid >= 0);
+    if (pid == 0) {
+        SharedRingBuffer* c = SharedRingBuffer_CreateOrOpen(1);
+        _exit(c != NULL ? 0 : 1);
+    }
+    int status = 0;
+    assert(waitpid(pid, &status, 0) == pid);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+
+    SharedRingBuffer* w4 = SharedRingBuffer_CreateOrOpen(1);
+    assert(w4 != NULL);
+    assert(SharedRingBuffer_GetEpoch(w4) == e0 + 4);  /* child +1, takeover +1 */
+
+    SharedRingBuffer_ReleaseWriterOwnership(w4);
+    SharedRingBuffer_Close(w4);
+    SharedRingBuffer_Destroy();
+}
+
+/* The R1 reconnection scenario: the app quits (teardown's ownership acquire
+ * bumps the epoch on the OLD inode, then unlinks) and relaunches (fresh
+ * segment, fresh epoch). A driver-style reader still mapped to the orphaned
+ * old inode sees the epoch change through its own mapping — that is the
+ * realtime detection signal — and a reader that reopens attaches to the new
+ * segment and receives the new writer's data. The old mapping is frozen and
+ * must never surface the new writer's samples. */
+static void test_reader_reopen_after_unlink_recreate_sees_new_epoch_and_data(void) {
+    shm_unlink(kSHM_Name);
+
+    /* Session 1: writer + continuously-mapped driver-style reader. */
+    SharedRingBuffer* w1 = SharedRingBuffer_CreateOrOpen(1);
+    assert(w1 != NULL);
+    SharedRingBuffer* r_old = SharedRingBuffer_CreateOrOpen(0);
+    assert(r_old != NULL);
+    uint32_t cachedEpoch = SharedRingBuffer_GetEpoch(r_old);
+
+    float first[4] = {0.1f, 0.2f, 0.3f, 0.4f};
+    SharedRingBuffer_Write(w1, first, 2);
+    float dst[4] = {0};
+    assert(SharedRingBuffer_Read(r_old, dst, 2) == 2);
+    for (int i = 0; i < 4; i++) assert(fabsf(dst[i] - first[i]) < 1e-6f);
+
+    /* App quit: release, unmap, then owner-gated teardown. The acquire
+     * inside DestroyIfUnowned bumps the epoch on the old inode right before
+     * the unlink — the bump the still-mapped reader must observe. */
+    SharedRingBuffer_ReleaseWriterOwnership(w1);
+    SharedRingBuffer_Close(w1);
+    assert(SharedRingBuffer_DestroyIfUnowned() == 1);
+    assert(shm_current_size() == -1);
+
+    /* Detection: the stale mapping's epoch no longer matches the cache.
+     * (Segment identity is asserted via the epoch, not st_ino: macOS POSIX
+     * shm objects report st_ino == 0, so inode comparison proves nothing.
+     * The epoch is precisely the identity signal R1 adds.) */
+    uint32_t staleEpoch = SharedRingBuffer_GetEpoch(r_old);
+    assert(staleEpoch != cachedEpoch);
+
+    /* App relaunch: a fresh segment with its own fresh epoch. */
+    SharedRingBuffer* w2 = SharedRingBuffer_CreateOrOpen(1);
+    assert(w2 != NULL);
+
+    uint32_t newEpoch = SharedRingBuffer_GetEpoch(w2);
+    assert(newEpoch != staleEpoch);
+
+    /* Driver reopen: attach the new segment; read the new writer's data. */
+    SharedRingBuffer* r_new = SharedRingBuffer_CreateOrOpen(0);
+    assert(r_new != NULL);
+    assert(SharedRingBuffer_GetEpoch(r_new) == newEpoch);
+    float second[4] = {-0.4f, -0.3f, -0.2f, -0.1f};
+    SharedRingBuffer_Write(w2, second, 2);
+    assert(SharedRingBuffer_Read(r_new, dst, 2) == 2);
+    for (int i = 0; i < 4; i++) assert(fabsf(dst[i] - second[i]) < 1e-6f);
+
+    /* The orphaned old mapping is frozen: no new data ever appears there. */
+    assert(SharedRingBuffer_Read(r_old, dst, 2) == 0);
+
+    SharedRingBuffer_Close(r_old);
+    SharedRingBuffer_Close(r_new);
+    SharedRingBuffer_ReleaseWriterOwnership(w2);
+    SharedRingBuffer_Close(w2);
+    SharedRingBuffer_Destroy();
+}
+
 /* ---------- Writer + Reader Simulation ---------- */
 
 static void test_writer_reader_interleaved(void) {
@@ -995,6 +1110,10 @@ int main(void) {
     RUN_TEST(test_writer_open_takes_over_after_owner_process_dies);
     RUN_TEST(test_destroy_if_unowned_skips_live_owner_then_unlinks);
     RUN_TEST(test_reader_receives_new_data_across_writer_close_reopen);
+
+    printf("\nEpoch / Segment Reconnection (R1):\n");
+    RUN_TEST(test_epoch_increments_across_ownership_transitions);
+    RUN_TEST(test_reader_reopen_after_unlink_recreate_sees_new_epoch_and_data);
 
     printf("\nWriter + Reader Simulation:\n");
     RUN_TEST(test_writer_reader_interleaved);

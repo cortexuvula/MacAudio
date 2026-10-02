@@ -19,10 +19,18 @@ struct SharedRingBuffer {
     // Carved out of what used to be header padding, so kSHMSize and the
     // buffer offset are unchanged.
     _Atomic int32_t writerOwnerPid;
-    uint8_t _padding[64 - (2 * 8 + 2 * 4 + 4)];
+    // Generation counter, bumped on every writer-ownership acquisition. A
+    // reader still mapped to the segment keeps seeing these pages even after
+    // the segment is unlinked, so the bump (including the one from teardown's
+    // final acquire, just before unlink) is how a reader detects that the
+    // writer side went away and the segment was replaced. Also carved out of
+    // former padding; kSHMSize and the buffer offset are unchanged.
+    _Atomic uint32_t epoch;
+    uint8_t _padding[64 - (2 * 8 + 2 * 4 + 4 + 4)];
     float buffer[kMaxFrameSize];
 };
 
+_Static_assert(offsetof(struct SharedRingBuffer, epoch) == 28, "epoch must sit in former padding right after writerOwnerPid");
 _Static_assert(offsetof(struct SharedRingBuffer, buffer) == 64, "buffer must be at cache-line offset 64");
 
 static const uint64_t kSHMSize = sizeof(struct SharedRingBuffer);
@@ -149,16 +157,30 @@ static int shm_owner_pid_is_dead(int32_t ownerPid) {
     return kill((pid_t)ownerPid, 0) != 0 && errno == ESRCH;
 }
 
+// Bump the generation counter on every successful writer-ownership
+// acquisition (fresh acquire, same-process re-acquire, dead-owner takeover).
+// Readers treat an epoch change as "the writer side was replaced". The bump
+// lands on the segment's own pages, so a still-mapped reader — the driver,
+// which cannot reopen from its realtime path — observes it and knows to
+// reattach. This includes the acquire inside DestroyIfUnowned: it bumps the
+// old inode right before unlinking, so a relaunched app's fresh segment is
+// what a reattaching reader finds, not a frozen orphan mapping.
+static void bump_epoch(SharedRingBuffer* rb) {
+    atomic_fetch_add_explicit(&rb->epoch, 1, memory_order_acq_rel);
+}
+
 int SharedRingBuffer_TryAcquireWriterOwnership(SharedRingBuffer* rb) {
     if (!rb) return 0;
     int32_t self = (int32_t)getpid();
     int32_t expected = 0;
     if (atomic_compare_exchange_strong_explicit(&rb->writerOwnerPid, &expected, self,
                                                 memory_order_acq_rel, memory_order_acquire)) {
+        bump_epoch(rb);
         return 1;
     }
     if (expected == self) {
         // Re-acquire by the owning process (e.g. Stop→Start in one app).
+        bump_epoch(rb);
         return 1;
     }
     if (expected > 0 && shm_owner_pid_is_dead(expected)) {
@@ -167,6 +189,7 @@ int SharedRingBuffer_TryAcquireWriterOwnership(SharedRingBuffer* rb) {
         int32_t dead = expected;
         if (atomic_compare_exchange_strong_explicit(&rb->writerOwnerPid, &dead, self,
                                                     memory_order_acq_rel, memory_order_acquire)) {
+            bump_epoch(rb);
             return 1;
         }
     }
@@ -278,6 +301,11 @@ void SharedRingBuffer_Write(SharedRingBuffer* rb, const float* frames, uint32_t 
 uint32_t SharedRingBuffer_GetActive(SharedRingBuffer* rb) {
     if (!rb) return 0;
     return atomic_load_explicit(&rb->active, memory_order_acquire);
+}
+
+uint32_t SharedRingBuffer_GetEpoch(SharedRingBuffer* rb) {
+    if (!rb) return 0;
+    return atomic_load_explicit(&rb->epoch, memory_order_acquire);
 }
 
 uint32_t SharedRingBuffer_GetSampleRate(SharedRingBuffer* rb) {

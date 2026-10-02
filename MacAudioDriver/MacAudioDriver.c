@@ -7,6 +7,7 @@
 #include <stdatomic.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 
 const Float64 kSupportedSampleRates[kNumSupportedSampleRates] = {44100.0, 48000.0, 96000.0};
 
@@ -70,11 +71,25 @@ static AudioServerPlugInDriverRef gDriverRef = &gDriverInterfacePtr;
 
 static AudioServerPlugInHostRef  gHost = NULL;
 static _Atomic(SharedRingBuffer*) gRingBuffer = NULL;
-// Pointer kept alive past StopIO so any DoIOOperation that already loaded the
-// previous gRingBuffer can finish without dereferencing freed memory. Closed
-// at the next StartIO under gDevice_IOMutex, by which time the HAL guarantees
-// all IO cycles for the prior session have ended.
-static SharedRingBuffer*         gRingBuffer_PendingClose = NULL;
+// Mappings kept alive past their replacement (StopIO detach or a reconnection
+// swap) so any DoIOOperation that already loaded the old gRingBuffer pointer
+// can finish without dereferencing unmapped memory. munmap is deferred to the
+// next StartIO under gDevice_IOMutex, by which time the HAL guarantees all IO
+// cycles of the prior session have ended. Multiple mappings can pile up when
+// the app quits/relaunches repeatedly while one recording client stays
+// continuously connected (each replacement retires one mapping mid-IO), so
+// this is a bounded ring of slots rather than a single pointer; a slot is
+// reaped per StartIO quiet window. Guarded by gDevice_IOMutex.
+#define kRingBuffer_PendingCloseSlots 8
+static SharedRingBuffer*         gRingBuffer_PendingClose[kRingBuffer_PendingCloseSlots];
+static UInt32                    gRingBuffer_PendingCloseCount = 0;
+// R1 reconnection state. The realtime path caches the shm epoch it is reading
+// through and compares it every IO cycle; a mismatch (the writer segment was
+// unlinked and recreated — app quit→relaunch) only sets gRingBuffer_ReopenNeeded.
+// The actual reopen (syscalls) happens on the non-realtime poller thread.
+static _Atomic uint32_t          gRingBuffer_EpochCache = 0;
+static _Atomic bool              gRingBuffer_ReopenNeeded = false;
+static _Atomic bool              gRingBuffer_ReopenThreadStarted = false;
 static _Atomic Float64           gDevice_SampleRate = kDevice_DefaultSampleRate;
 static _Atomic UInt32            gDevice_IOClientCount = 0;
 static _Atomic bool              gDevice_IOIsRunning = false;
@@ -1082,6 +1097,124 @@ static OSStatus MacAudio_SetPropertyData(AudioServerPlugInDriverRef inDriver, Au
     return kAudioHardwareUnknownPropertyError;
 }
 
+#pragma mark - Ring Buffer Reconnection (R1)
+
+// Deferred munmap of a replaced mapping. NEVER close here: when IO is running
+// there is no quiet window, and a DoIOOperation that already loaded the old
+// pointer may still be dereferencing it — munmap now would risk SIGBUS in
+// coreaudiod. Park the mapping in a pending-close slot; the next StartIO
+// reaps it once the HAL guarantees no in-flight IO cycles. Caller holds
+// gDevice_IOMutex.
+static void retire_ring_buffer_mapping(SharedRingBuffer* rb) {
+    if (!rb) return;
+    if (gRingBuffer_PendingCloseCount < kRingBuffer_PendingCloseSlots) {
+        gRingBuffer_PendingClose[gRingBuffer_PendingCloseCount++] = rb;
+        return;
+    }
+    // Fail safe: keep the mapping (reclaimed when coreaudiod eventually
+    // restarts) rather than risk munmap'ing under a live reader.
+    os_log_error(gLog, "Pending-close slots full; leaking ring buffer mapping %p", rb);
+}
+
+// munmap every retired mapping. Called only from StartIO's zero-client
+// transition, where the HAL guarantees no IO cycles are in flight.
+static void reap_pending_close_ring_buffers(void) {
+    for (UInt32 i = 0; i < gRingBuffer_PendingCloseCount; i++) {
+        SharedRingBuffer_Close(gRingBuffer_PendingClose[i]);
+    }
+    gRingBuffer_PendingCloseCount = 0;
+}
+
+// Reattach the shm segment after the realtime path flagged a replaced writer
+// (epoch change) or when no mapping is attached (the initial StartIO open
+// failed because the app hadn't created the segment yet). All syscalls
+// (shm_open/mmap) live here on the poller thread, never on the realtime
+// thread. Caller holds gDevice_IOMutex.
+static void driver_reopen_ring_buffer_locked(void) {
+    if (!atomic_load_explicit(&gDevice_IOIsRunning, memory_order_acquire)) {
+        // IO stopped between the poller's unlocked pre-filter and acquiring
+        // the mutex; StartIO/StopIO own the mapping lifecycle in that state.
+        return;
+    }
+    bool flagged = atomic_load_explicit(&gRingBuffer_ReopenNeeded, memory_order_acquire);
+    SharedRingBuffer* current = atomic_load_explicit(&gRingBuffer, memory_order_acquire);
+    if (!flagged && current) {
+        return;  // healthy — nothing to reopen
+    }
+
+    SharedRingBuffer* newRb = SharedRingBuffer_CreateOrOpen(0);
+    if (!newRb) {
+        // Segment doesn't exist yet — the app hasn't (re)created it. Leave
+        // any existing mapping attached (realtime keeps outputting silence
+        // for a stale epoch) and retry on a later poll.
+        return;
+    }
+    // Recache BEFORE publishing the pointer: the release store here plus the
+    // acquire of the pointer publish below means a realtime cycle that
+    // observes the new mapping also observes the matching epoch cache, so it
+    // doesn't flag the fresh segment as stale.
+    atomic_store_explicit(&gRingBuffer_EpochCache,
+                          SharedRingBuffer_GetEpoch(newRb), memory_order_release);
+    SharedRingBuffer* oldRb = atomic_exchange_explicit(&gRingBuffer, newRb, memory_order_acq_rel);
+    retire_ring_buffer_mapping(oldRb);
+    atomic_store_explicit(&gRingBuffer_ReopenNeeded, false, memory_order_release);
+    os_log(gLog, "Reopen: reattached ring buffer (epoch %u)",
+           SharedRingBuffer_GetEpoch(newRb));
+}
+
+// The realtime path can only set a flag; this thread does the reconnect work.
+// It polls: a realtime callback must not signal a condvar (lock + syscall),
+// so wakeups are time-based instead. The unlocked pre-filter is two atomic
+// loads; the thread does nothing while no client is running (StartIO/StopIO
+// fully own the mapping then) or while the mapping is healthy.
+static void* ring_buffer_reopen_thread_entry(void* arg) {
+    (void)arg;
+    for (;;) {
+        struct timespec nap = { .tv_sec = 0, .tv_nsec = 50 * 1000 * 1000 };
+        nanosleep(&nap, NULL);
+
+        if (!atomic_load_explicit(&gDevice_IOIsRunning, memory_order_acquire)) {
+            continue;
+        }
+        if (!atomic_load_explicit(&gRingBuffer_ReopenNeeded, memory_order_acquire) &&
+            atomic_load_explicit(&gRingBuffer, memory_order_acquire) != NULL) {
+            continue;
+        }
+
+        pthread_mutex_lock(&gDevice_IOMutex);
+        driver_reopen_ring_buffer_locked();
+        pthread_mutex_unlock(&gDevice_IOMutex);
+    }
+    return NULL;  // unreachable; the thread lives as long as coreaudiod
+}
+
+// Start the poller exactly once, lazily from StartIO (never the realtime
+// path). Detached: the plugin is never unloaded within a coreaudiod process
+// lifetime, so the thread simply runs until the process exits. Caller holds
+// gDevice_IOMutex.
+static void ensure_ring_buffer_reopen_thread(void) {
+    bool expected = false;
+    if (!atomic_compare_exchange_strong_explicit(&gRingBuffer_ReopenThreadStarted,
+                                                 &expected, true,
+                                                 memory_order_acq_rel, memory_order_acquire)) {
+        return;
+    }
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_t thread;
+    int rc = pthread_create(&thread, &attr, ring_buffer_reopen_thread_entry, NULL);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) {
+        // Allow a retry on a later StartIO rather than disabling
+        // reconnection for the process. Until a retry succeeds, behavior is
+        // the pre-R1 one: a replaced segment means silence until the client
+        // stops/restarts the device.
+        atomic_store_explicit(&gRingBuffer_ReopenThreadStarted, false, memory_order_release);
+        os_log_error(gLog, "Failed to start ring buffer reopen thread (%d)", rc);
+    }
+}
+
 #pragma mark - IO Operations
 
 static OSStatus MacAudio_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID) {
@@ -1095,13 +1228,11 @@ static OSStatus MacAudio_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjec
         atomic_store_explicit(&gDevice_AnchorHostTime, mach_absolute_time(), memory_order_release);
         gDevice_TimeStampCounter = 0;
 
-        // Reap the deferred close from the previous StopIO. Safe here because
+        // Reap the deferred closes from the previous StopIO (and any mappings
+        // retired mid-IO by the reconnection poller). Safe here because
         // we're under gDevice_IOMutex and the prior IO cycles have ended (HAL
         // guarantees this between StopIO and StartIO).
-        if (gRingBuffer_PendingClose) {
-            SharedRingBuffer_Close(gRingBuffer_PendingClose);
-            gRingBuffer_PendingClose = NULL;
-        }
+        reap_pending_close_ring_buffers();
 
         // Re-open the shm segment for this fresh IO cycle.
         SharedRingBuffer* oldRb = atomic_load_explicit(&gRingBuffer, memory_order_acquire);
@@ -1112,8 +1243,17 @@ static OSStatus MacAudio_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjec
         atomic_store_explicit(&gRingBuffer, newRb, memory_order_release);
         if (!newRb) {
             os_log_error(gLog, "StartIO: failed to open ring buffer");
-            // Still continue - device can work, just silent
+            // Still continue - device can work, just silent. The reopen
+            // poller retries while a client stays connected, so audio
+            // recovers once the app creates the segment.
+        } else {
+            atomic_store_explicit(&gRingBuffer_EpochCache,
+                                  SharedRingBuffer_GetEpoch(newRb), memory_order_release);
+            atomic_store_explicit(&gRingBuffer_ReopenNeeded, false, memory_order_release);
         }
+
+        // Lazily start the reconnection poller (no-op after the first client).
+        ensure_ring_buffer_reopen_thread();
     }
     clientCount++;
     atomic_store_explicit(&gDevice_IOClientCount, clientCount, memory_order_release);
@@ -1144,13 +1284,7 @@ static OSStatus MacAudio_StopIO(AudioServerPlugInDriverRef inDriver, AudioObject
         // device until the next StartIO, where it's safe to finish the close.
         SharedRingBuffer* oldRb = atomic_exchange_explicit(&gRingBuffer, NULL, memory_order_acq_rel);
         if (oldRb) {
-            // If a previous deferred close hasn't been reaped yet (shouldn't
-            // happen — Start always reaps before this point), reap it now to
-            // avoid leaking.
-            if (gRingBuffer_PendingClose) {
-                SharedRingBuffer_Close(gRingBuffer_PendingClose);
-            }
-            gRingBuffer_PendingClose = oldRb;
+            retire_ring_buffer_mapping(oldRb);
         }
     }
     atomic_store_explicit(&gDevice_IOClientCount, clientCount, memory_order_release);
@@ -1223,7 +1357,26 @@ static OSStatus MacAudio_DoIOOperation(AudioServerPlugInDriverRef inDriver, Audi
 
     SharedRingBuffer* rb = atomic_load_explicit(&gRingBuffer, memory_order_acquire);
 
-    if (!rb || !SharedRingBuffer_GetActive(rb)) {
+    if (!rb) {
+        memset(outBuffer, 0, totalSamples * sizeof(Float32));
+        return noErr;
+    }
+
+    // R1 reconnection: detect a REPLACED writer segment (the app quit and
+    // relaunch unlinks + recreates the shm; teardown's final ownership
+    // acquire bumps the epoch on the old inode before the unlink, so this
+    // mapping observes it). Realtime does only two atomic loads and a
+    // compare — no syscalls, no allocation — and flags the non-realtime
+    // poller to reopen. This cycle outputs silence; audio resumes after the
+    // poller reattaches the new segment.
+    if (SharedRingBuffer_GetEpoch(rb) !=
+        atomic_load_explicit(&gRingBuffer_EpochCache, memory_order_acquire)) {
+        atomic_store_explicit(&gRingBuffer_ReopenNeeded, true, memory_order_release);
+        memset(outBuffer, 0, totalSamples * sizeof(Float32));
+        return noErr;
+    }
+
+    if (!SharedRingBuffer_GetActive(rb)) {
         memset(outBuffer, 0, totalSamples * sizeof(Float32));
         return noErr;
     }
