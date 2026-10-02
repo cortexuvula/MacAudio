@@ -1,7 +1,16 @@
 import Foundation
 import os
 
-final class SharedRingBufferWriter {
+/// Seam over SharedRingBufferWriter so tests can observe the frame counts
+/// AudioMixer writes into the ring buffer.
+protocol RingBufferWriting: AnyObject {
+    func open() throws
+    func write(frames: UnsafePointer<Float>, frameCount: UInt32)
+    func close()
+    func destroy()
+}
+
+final class SharedRingBufferWriter: RingBufferWriting {
     // Touched from both the control thread (open/close) and the realtime audio
     // IO thread (write, from AudioMixer). An actor is the wrong tool — the IO
     // path cannot suspend — so guard the pointer with an os_unfair_lock, whose

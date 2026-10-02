@@ -2,11 +2,43 @@ import AVFAudio
 import CoreAudio
 import os
 
-final class AudioMixer {
-    private let micCapture = MicCapture()
-    private let systemCapture = SystemAudioCapture()
-    private let ringBufferWriter = SharedRingBufferWriter()
+/// Seam over AudioMixer covering the members AppState drives a mixer through,
+/// so the menu state machine can be tested against a mock.
+protocol AudioMixering: AnyObject {
+    var micGain: Float { get set }
+    var systemGain: Float { get set }
+    func start(micDeviceID: AudioDeviceID?) throws
+    func stop()
+    func setMicDevice(_ deviceID: AudioDeviceID) -> String?
+    func destroySharedMemory()
+}
+
+/// Seam over SystemAudioCapture so tests can force the mic-only path
+/// deterministically (a real tap depends on Screen Recording TCC state).
+protocol SystemAudioCapturing: AnyObject {
+    var onAudioReceived: ((UnsafePointer<AudioBufferList>, UInt32) -> Void)? { get set }
+    var sampleRate: Float64 { get }
+    func start() throws
+    func stop()
+}
+
+extension SystemAudioCapture: SystemAudioCapturing {}
+
+final class AudioMixer: AudioMixering {
+    private let micCapture: MicCapturing
+    private let systemCapture: SystemAudioCapturing
+    private let ringBufferWriter: RingBufferWriting
     private let logger = Logger(subsystem: "com.macaudio.app", category: "mixer")
+
+    /// Production callers use the default arguments (the real capture and
+    /// writer instances); tests inject mocks.
+    init(micCapture: MicCapturing = MicCapture(),
+         systemCapture: SystemAudioCapturing = SystemAudioCapture(),
+         ringBufferWriter: RingBufferWriting = SharedRingBufferWriter()) {
+        self.micCapture = micCapture
+        self.systemCapture = systemCapture
+        self.ringBufferWriter = ringBufferWriter
+    }
 
     // Lock-free mic buffer for cross-thread communication
     private var micBufferLock = os_unfair_lock()

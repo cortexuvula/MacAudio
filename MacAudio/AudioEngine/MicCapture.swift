@@ -3,7 +3,18 @@ import AudioToolbox
 import Foundation
 import os
 
-final class MicCapture {
+/// Seam over MicCapture so AudioMixer's device-switch and delivery paths can
+/// be driven by a deterministic mock in tests.
+protocol MicCapturing: AnyObject {
+    var deviceID: AudioDeviceID { get }
+    var sampleRate: Float64 { get }
+    var onAudioReceived: ((UnsafePointer<Float>, UInt32, UInt32) -> Void)? { get set }
+    func setInputDevice(_ id: AudioDeviceID)
+    func start() throws
+    func stop()
+}
+
+final class MicCapture: MicCapturing {
     private(set) var deviceID: AudioDeviceID = kAudioObjectUnknown
     private var ioProcID: AudioDeviceIOProcID?
     private var isRunning = false

@@ -34,7 +34,7 @@ final class AppState: ObservableObject {
     @Published var isSetupComplete = false
     @Published var launchAtLogin = false
     @Published var autoStartCapture = false
-    private var audioMixer: AudioMixer?
+    private var audioMixer: AudioMixering?
     private var deviceChangeListener: AudioObjectPropertyListenerBlock?
     private let logger = Logger(subsystem: "com.macaudio.app", category: "state")
 
@@ -47,7 +47,8 @@ final class AppState: ObservableObject {
     /// Preferred mic identified by stable UID. AudioDeviceID is a per-boot
     /// numeric handle; UID survives unplug/replug and reboots, so we prefer it
     /// when matching saved selection against the live device list.
-    private var preferredMicUID: String?
+    /// Internal (not private) so tests can assert the revert state machine.
+    var preferredMicUID: String?
 
     /// Set when loadPreferences() read autoStartCapture from the plist file
     /// because cfprefsd hadn't loaded our domain yet. Prevents attemptAutoStart()
@@ -55,7 +56,10 @@ final class AppState: ObservableObject {
     /// hit (nil → non-nil-but-wrong between the two reads).
     private var didLoadAutoStartFromPlist = false
 
-    init() {
+    /// Production callers use the default (no mixer until startAudio builds
+    /// one); tests inject a mock behind the AudioMixering seam.
+    init(audioMixer: AudioMixering? = nil) {
+        self.audioMixer = audioMixer
         loadPreferences()
 
         Task.detached {
