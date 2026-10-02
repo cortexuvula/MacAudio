@@ -527,6 +527,204 @@ static void test_no_recovery_when_segment_already_correct_size(void) {
     SharedRingBuffer_Destroy();
 }
 
+/* ---------- Exclusive Writer Ownership ---------- */
+
+/* A second live writer (a forked stand-in for a second app instance) must be
+ * refused: its writer-open may not reset/silence the streaming writer's
+ * segment. Refusal is the child's pass condition; the parent then verifies
+ * its heads and unread contents survived untouched. */
+static void test_writer_open_refused_while_foreign_writer_live(void) {
+    shm_unlink(kSHM_Name);
+
+    /* Instance A opens (acquires ownership) and streams tagged samples. */
+    SharedRingBuffer* a = SharedRingBuffer_CreateOrOpen(1);
+    assert(a != NULL);
+    float tag[4] = {0.5f, -0.5f, 0.25f, -0.25f};
+    SharedRingBuffer_Write(a, tag, 2);
+    uint64_t headBefore = SharedRingBuffer_GetWriteHead(a);
+    assert(headBefore == 2);
+
+    pid_t pid = fork();
+    assert(pid >= 0);
+    if (pid == 0) {
+        SharedRingBuffer* b = SharedRingBuffer_CreateOrOpen(1);
+        _exit(b == NULL ? 0 : 1);
+    }
+    int status = 0;
+    assert(waitpid(pid, &status, 0) == pid);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+
+    /* A's stream must be untouched: heads and unread contents intact. */
+    assert(SharedRingBuffer_GetWriteHead(a) == headBefore);
+    SharedRingBuffer* r = SharedRingBuffer_CreateOrOpen(0);
+    assert(r != NULL);
+    float dst[4] = {0};
+    assert(SharedRingBuffer_Read(r, dst, 2) == 2);
+    for (int i = 0; i < 4; i++) assert(fabsf(dst[i] - tag[i]) < 1e-6f);
+
+    SharedRingBuffer_Close(r);
+    SharedRingBuffer_Close(a);
+    SharedRingBuffer_Destroy();
+}
+
+/* Ownership must be releasable (Stop) so a DIFFERENT process can become the
+ * writer (Start): refused while the first owner is live, allowed after it
+ * releases. */
+static void test_release_writer_ownership_allows_foreign_writer_open(void) {
+    shm_unlink(kSHM_Name);
+
+    SharedRingBuffer* a = SharedRingBuffer_CreateOrOpen(1);
+    assert(a != NULL);
+
+    pid_t pid = fork();
+    assert(pid >= 0);
+    if (pid == 0) {
+        SharedRingBuffer* b = SharedRingBuffer_CreateOrOpen(1);
+        _exit(b == NULL ? 0 : 1);
+    }
+    int status = 0;
+    assert(waitpid(pid, &status, 0) == pid);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+
+    /* A releases (Stop); now a foreign writer must be able to open. */
+    SharedRingBuffer_ReleaseWriterOwnership(a);
+    SharedRingBuffer_Close(a);
+
+    pid = fork();
+    assert(pid >= 0);
+    if (pid == 0) {
+        SharedRingBuffer* b = SharedRingBuffer_CreateOrOpen(1);
+        if (b) {
+            SharedRingBuffer_ReleaseWriterOwnership(b);
+            SharedRingBuffer_Close(b);
+        }
+        _exit(b != NULL ? 0 : 1);
+    }
+    assert(waitpid(pid, &status, 0) == pid);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+
+    SharedRingBuffer_Destroy();
+}
+
+/* A crashed owner (exits without release/close — _exit skips cleanup) must
+ * not wedge the segment forever: the next writer-open takes over via the dead
+ * pid and the segment stays functional. */
+static void test_writer_open_takes_over_after_owner_process_dies(void) {
+    shm_unlink(kSHM_Name);
+
+    pid_t pid = fork();
+    assert(pid >= 0);
+    if (pid == 0) {
+        SharedRingBuffer* b = SharedRingBuffer_CreateOrOpen(1);
+        _exit(b != NULL ? 0 : 1);
+    }
+    int status = 0;
+    assert(waitpid(pid, &status, 0) == pid);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+
+    SharedRingBuffer* w = SharedRingBuffer_CreateOrOpen(1);
+    assert(w != NULL);
+
+    /* The taken-over segment must be functional end-to-end. */
+    SharedRingBuffer* r = SharedRingBuffer_CreateOrOpen(0);
+    assert(r != NULL);
+    float src[4] = {0.125f, -0.25f, 0.5f, -1.0f};
+    SharedRingBuffer_Write(w, src, 2);
+    float dst[4] = {0};
+    assert(SharedRingBuffer_Read(r, dst, 2) == 2);
+    for (int i = 0; i < 4; i++) assert(fabsf(dst[i] - src[i]) < 1e-6f);
+
+    SharedRingBuffer_Close(r);
+    SharedRingBuffer_Close(w);
+    SharedRingBuffer_Destroy();
+}
+
+/* Teardown is owner-only: a second instance quitting (DestroyIfUnowned) must
+ * NOT unlink the segment while a live writer owns it; once that writer stops
+ * and quits, the teardown goes through. */
+static void test_destroy_if_unowned_skips_live_owner_then_unlinks(void) {
+    shm_unlink(kSHM_Name);
+
+    SharedRingBuffer* a = SharedRingBuffer_CreateOrOpen(1);
+    assert(a != NULL);
+    float tag[4] = {0.75f, 0.5f, 0.25f, 0.0f};
+    SharedRingBuffer_Write(a, tag, 2);
+
+    pid_t pid = fork();
+    assert(pid >= 0);
+    if (pid == 0) {
+        _exit(SharedRingBuffer_DestroyIfUnowned() == 0 ? 0 : 1);
+    }
+    int status = 0;
+    assert(waitpid(pid, &status, 0) == pid);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+
+    /* Segment still there, A's unread data intact. */
+    assert(shm_current_size() >= 0);
+    SharedRingBuffer* r = SharedRingBuffer_CreateOrOpen(0);
+    assert(r != NULL);
+    float dst[4] = {0};
+    assert(SharedRingBuffer_Read(r, dst, 2) == 2);
+    for (int i = 0; i < 4; i++) assert(fabsf(dst[i] - tag[i]) < 1e-6f);
+    SharedRingBuffer_Close(r);
+
+    /* Once A stops (release) and quits, teardown goes through: unlinked. */
+    SharedRingBuffer_ReleaseWriterOwnership(a);
+    SharedRingBuffer_Close(a);
+    assert(SharedRingBuffer_DestroyIfUnowned() == 1);
+    assert(shm_current_size() == -1);
+}
+
+/* The Stop→Start preservation contract (no unlink on Stop): a reader that
+ * stays mapped across a writer close/reopen keeps receiving newly written
+ * samples on the SAME inode — the continuously-connected driver client's
+ * guarantee. (Distinct from driver reconnection, which concerns a REPLACED
+ * segment after an unlink.) */
+static void test_reader_receives_new_data_across_writer_close_reopen(void) {
+    shm_unlink(kSHM_Name);
+
+    SharedRingBuffer* w1 = SharedRingBuffer_CreateOrOpen(1);
+    assert(w1 != NULL);
+    int fd1 = shm_open(kSHM_Name, O_RDWR, 0);
+    assert(fd1 >= 0);
+    struct stat before;
+    assert(fstat(fd1, &before) == 0);
+    close(fd1);
+
+    SharedRingBuffer* r = SharedRingBuffer_CreateOrOpen(0);
+    assert(r != NULL);
+    float first[4] = {0.1f, 0.2f, 0.3f, 0.4f};
+    SharedRingBuffer_Write(w1, first, 2);
+    float dst[4] = {0};
+    assert(SharedRingBuffer_Read(r, dst, 2) == 2);
+    for (int i = 0; i < 4; i++) assert(fabsf(dst[i] - first[i]) < 1e-6f);
+
+    /* Stop: writer releases ownership and unmaps; the segment survives. */
+    SharedRingBuffer_ReleaseWriterOwnership(w1);
+    SharedRingBuffer_Close(w1);
+
+    /* Start: writer-open reuses the same inode (no unlink) and re-acquires. */
+    SharedRingBuffer* w2 = SharedRingBuffer_CreateOrOpen(1);
+    assert(w2 != NULL);
+    int fd2 = shm_open(kSHM_Name, O_RDWR, 0);
+    assert(fd2 >= 0);
+    struct stat after;
+    assert(fstat(fd2, &after) == 0);
+    close(fd2);
+    assert(before.st_ino == after.st_ino);
+
+    /* The never-reopened reader must receive the new writer's samples. */
+    float second[4] = {-0.4f, -0.3f, -0.2f, -0.1f};
+    SharedRingBuffer_Write(w2, second, 2);
+    assert(SharedRingBuffer_Read(r, dst, 2) == 2);
+    for (int i = 0; i < 4; i++) assert(fabsf(dst[i] - second[i]) < 1e-6f);
+
+    SharedRingBuffer_Close(r);
+    SharedRingBuffer_ReleaseWriterOwnership(w2);
+    SharedRingBuffer_Close(w2);
+    SharedRingBuffer_Destroy();
+}
+
 /* ---------- Writer + Reader Simulation ---------- */
 
 static void test_writer_reader_interleaved(void) {
@@ -682,11 +880,11 @@ static void test_cross_process_spsc_contract(void) {
     assert(pid >= 0);
 
     if (pid == 0) {
-        /* ---- Writer child: only ever touches writeHeadFrames ---- */
-        SharedRingBuffer* wc = SharedRingBuffer_CreateOrOpen(1);
-        assert(wc);
-        SharedRingBuffer_SetActive(wc, 1);
-
+        /* ---- Writer child: only ever touches writeHeadFrames ----
+         * Writes through the parent-owned handle inherited across fork: a
+         * fresh writer-open here would be refused by writer ownership (the
+         * parent is alive and owns the segment), and the inherited mapping
+         * keeps this a genuine cross-process SPSC exercise. */
         uint32_t chunk = 256;
         float* src = calloc(chunk * kNumChannels, sizeof(float));
         assert(src);
@@ -695,13 +893,12 @@ static void test_cross_process_spsc_contract(void) {
         for (uint32_t iter = 0; iter < 4000; iter++) {
             for (uint32_t i = 0; i < chunk * kNumChannels; i++)
                 src[i] = (float)(iter + 1);       /* tag each chunk by iter   */
-            SharedRingBuffer_Write(wc, src, chunk);
-            uint64_t wh = SharedRingBuffer_GetWriteHead(wc);
+            SharedRingBuffer_Write(w, src, chunk);
+            uint64_t wh = SharedRingBuffer_GetWriteHead(w);
             assert(wh > lastWriteHead);            /* writer head monotonic    */
             lastWriteHead = wh;
         }
         free(src);
-        SharedRingBuffer_Close(wc);
         _exit(0);
     }
 
@@ -791,6 +988,13 @@ int main(void) {
     RUN_TEST(test_recovers_from_zero_sized_shm_segment);
     RUN_TEST(test_recovers_from_wrong_nonzero_sized_shm_segment);
     RUN_TEST(test_no_recovery_when_segment_already_correct_size);
+
+    printf("\nExclusive Writer Ownership:\n");
+    RUN_TEST(test_writer_open_refused_while_foreign_writer_live);
+    RUN_TEST(test_release_writer_ownership_allows_foreign_writer_open);
+    RUN_TEST(test_writer_open_takes_over_after_owner_process_dies);
+    RUN_TEST(test_destroy_if_unowned_skips_live_owner_then_unlinks);
+    RUN_TEST(test_reader_receives_new_data_across_writer_close_reopen);
 
     printf("\nWriter + Reader Simulation:\n");
     RUN_TEST(test_writer_reader_interleaved);

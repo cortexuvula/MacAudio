@@ -185,3 +185,74 @@ final class AppStateMicDeviceSwitchTests: XCTestCase {
                        "a successful switch must not touch lastError")
     }
 }
+
+/// stopAudio/teardown lifecycle (issue #3, R3): Stop parks the mixer without
+/// destroying its shared-memory segment (a connected driver client's mapping
+/// must survive Stop→Start), yet quitting after a Stop must still reach
+/// destroySharedMemory through the retained mixer — and exactly once.
+final class AppStateStopRetainsMixerTests: XCTestCase {
+
+    /// Name of this test's isolated defaults suite, removed in tearDown.
+    private var suiteName: String?
+
+    override func tearDown() {
+        if let suiteName {
+            UserDefaults.standard.removePersistentDomain(forName: suiteName)
+        }
+        suiteName = nil
+        super.tearDown()
+    }
+
+    private func makeIsolatedDefaults() throws -> UserDefaults {
+        let name = "AppStateStopRetainsMixerTests-\(UUID().uuidString)"
+        suiteName = name
+        return try XCTUnwrap(UserDefaults(suiteName: name),
+                             "a fresh suite name must always initialize")
+    }
+
+    /// User-toggle Stop must stop the mixer but never destroy the segment.
+    @MainActor
+    func test_stop_calls_stop_but_never_destroy() throws {
+        let mixer = MockAudioMixer()
+        let state = AppState(audioMixer: mixer, defaults: try makeIsolatedDefaults())
+        state.isActive = true
+
+        state.toggleActive()  // isActive == true routes to stopAudio()
+
+        XCTAssertEqual(mixer.stopCallCount, 1,
+                       "Stop must stop the mixer")
+        XCTAssertEqual(mixer.destroySharedMemoryCallCount, 0,
+                       "Stop must NOT destroy the shm segment — it survives Stop→Start")
+        XCTAssertFalse(state.isActive)
+        XCTAssertEqual(state.captureStatus, .stopped)
+    }
+
+    /// Quitting after a Stop must still destroy the segment: the stopped
+    /// mixer stays reachable by cleanupForTermination (retention is the fix).
+    @MainActor
+    func test_stop_then_termination_reaches_destroy_via_retained_mixer() throws {
+        let mixer = MockAudioMixer()
+        let state = AppState(audioMixer: mixer, defaults: try makeIsolatedDefaults())
+        state.isActive = true
+
+        state.toggleActive()
+        state.cleanupForTermination()
+
+        XCTAssertEqual(mixer.destroySharedMemoryCallCount, 1,
+                       "quitting after a Stop must still destroy the segment via the retained mixer")
+    }
+
+    /// Termination cleanup is idempotent: repeated calls must not repeat the
+    /// destroy.
+    @MainActor
+    func test_repeated_termination_cleanup_does_not_repeat_destroy() throws {
+        let mixer = MockAudioMixer()
+        let state = AppState(audioMixer: mixer, defaults: try makeIsolatedDefaults())
+
+        state.cleanupForTermination()
+        state.cleanupForTermination()
+
+        XCTAssertEqual(mixer.destroySharedMemoryCallCount, 1,
+                       "cleanupForTermination must destroy exactly once")
+    }
+}

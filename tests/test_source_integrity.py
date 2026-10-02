@@ -577,10 +577,28 @@ class TestSwiftThreadSafety(unittest.TestCase):
         self.assertIn("AudioObjectRemovePropertyListenerBlock", src,
                        "AppState deinit must remove audio property listener block")
 
-    def test_app_state_calls_destroy_shared_memory(self):
+    def test_app_state_stop_audio_does_not_destroy_shared_memory(self):
+        """Stop must NOT tear down the shm segment: it has to survive
+        Stop→Start so a continuously-connected driver client's mapping stays
+        valid. Teardown belongs to termination cleanup only. (Behavioral
+        coverage: AppStateStopRetainsMixerTests in MacAudioTests.)"""
         src = _read("MacAudio/Models/AppState.swift")
-        self.assertIn("destroySharedMemory", src,
-                       "AppState.stopAudio must call destroySharedMemory to clean up shm")
+        match = re.search(r"func stopAudio\(\) \{.*?\n    \}", src, re.DOTALL)
+        self.assertIsNotNone(match, "AppState.stopAudio must exist")
+        # Strip comments: the retention rationale may legitimately NAME
+        # destroySharedMemory; only an actual call is a violation.
+        body = re.sub(r"//[^\n]*", "", match.group(0))
+        self.assertNotIn("destroySharedMemory", body,
+                         "stopAudio must NOT call destroySharedMemory — the segment "
+                         "survives Stop→Start; teardown belongs to "
+                         "cleanupForTermination only")
+
+    def test_app_state_termination_cleanup_destroys_shared_memory(self):
+        src = _read("MacAudio/Models/AppState.swift")
+        match = re.search(r"func cleanupForTermination\(\) \{.*?\n    \}", src, re.DOTALL)
+        self.assertIsNotNone(match, "AppState.cleanupForTermination must exist")
+        self.assertIn("destroySharedMemory", match.group(0),
+                      "termination cleanup must destroy the shm segment")
 
     def test_audio_mixer_has_destroy_shared_memory(self):
         src = _read("MacAudio/AudioEngine/AudioMixer.swift")
@@ -589,8 +607,10 @@ class TestSwiftThreadSafety(unittest.TestCase):
 
     def test_ring_buffer_writer_has_destroy(self):
         src = _read("MacAudio/AudioEngine/SharedRingBufferWriter.swift")
-        self.assertIn("SharedRingBuffer_Destroy", src,
-                       "SharedRingBufferWriter.destroy() must call SharedRingBuffer_Destroy")
+        self.assertIn("SharedRingBuffer_DestroyIfUnowned", src,
+                       "SharedRingBufferWriter.destroy() must unlink via the "
+                       "ownership-gated SharedRingBuffer_DestroyIfUnowned — a live "
+                       "second writer's segment must not be unlinked")
 
 
 # ---------------------------------------------------------------------------

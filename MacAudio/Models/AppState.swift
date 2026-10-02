@@ -410,7 +410,12 @@ final class AppState: ObservableObject {
 
     private func stopAudio() {
         audioMixer?.stop()
-        audioMixer = nil
+        // The stopped mixer is intentionally retained rather than nil'd:
+        // Stop must NOT destroy the shared-memory segment (a connected driver
+        // client's mapping has to survive Stop→Start), but quitting after a
+        // Stop still needs to reach destroySharedMemory via
+        // cleanupForTermination. The next successful startAudio replaces the
+        // retained mixer.
         isActive = false
         captureStatus = .stopped
         lastError = nil

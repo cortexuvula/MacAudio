@@ -38,6 +38,12 @@ final class SharedRingBufferWriter: RingBufferWriting {
         closeLocked()
 
         guard let rb = SharedRingBuffer_CreateOrOpen(1) else {
+            // CreateOrOpen refuses to reset a segment owned by a live writer
+            // (a second app instance); surface that case as a distinct error.
+            if SharedRingBuffer_HasLiveWriterOwner() != 0 {
+                throw NSError(domain: "MacAudio", code: 2,
+                              userInfo: [NSLocalizedDescriptionKey: "Another MacAudio instance is already capturing audio"])
+            }
             throw NSError(domain: "MacAudio", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "Failed to create/open shared ring buffer"])
         }
@@ -69,13 +75,21 @@ final class SharedRingBufferWriter: RingBufferWriting {
     private func closeLocked() {
         guard let rb = ringBuffer else { return }
         SharedRingBuffer_SetActive(rb, 0)
+        // Release writer ownership so a later writer-open (this instance's
+        // next Start or another instance) can acquire it. No-op if this
+        // handle doesn't currently hold ownership.
+        SharedRingBuffer_ReleaseWriterOwnership(rb)
         SharedRingBuffer_Close(rb)
         ringBuffer = nil
     }
 
     func destroy() {
         close()
-        SharedRingBuffer_Destroy()
+        // Teardown is owner-only: skipped when a live writer (another app
+        // instance that started after our Stop) owns the segment, so quitting
+        // one instance cannot unlink the segment out from under a writer that
+        // is still streaming.
+        SharedRingBuffer_DestroyIfUnowned()
     }
 
     deinit {

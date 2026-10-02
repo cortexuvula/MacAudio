@@ -56,8 +56,12 @@ private final class RingBufferWriterMock: RingBufferWriting {
     /// Interleaved sample payload of each write, so tests can pin delivered
     /// contents (gain/clip), not just frame counts.
     private(set) var writtenSamples: [[Float]] = []
+    /// When non-nil, open() throws it (models writer-ownership refusal from
+    /// a second app instance).
+    var stubbedOpenError: Error?
 
     func open() throws {
+        if let stubbedOpenError { throw stubbedOpenError }
         openCallCount += 1
     }
 
@@ -77,6 +81,33 @@ private final class RingBufferWriterMock: RingBufferWriting {
 }
 
 final class AudioMixerMicDeviceSwitchTests: XCTestCase {
+
+    /// A refused writer open (second app instance holds writer ownership)
+    /// must fail start() outright — the refusal error propagates and no
+    /// capture machinery is left half-started.
+    func test_start_propagates_writer_open_refusal_without_starting_mic() {
+        let mic = MicCaptureMock()
+        mic.deviceID = 50
+        let ring = RingBufferWriterMock()
+        ring.stubbedOpenError = NSError(
+            domain: "MacAudio", code: 2,
+            userInfo: [NSLocalizedDescriptionKey: "Another MacAudio instance is already capturing audio"])
+        let mixer = AudioMixer(micCapture: mic,
+                               systemCapture: SystemAudioCaptureMock(),
+                               ringBufferWriter: ring)
+
+        XCTAssertThrowsError(try mixer.start(micDeviceID: 50)) { error in
+            XCTAssertEqual((error as NSError).localizedDescription,
+                           "Another MacAudio instance is already capturing audio",
+                           "the writer-ownership refusal must surface verbatim")
+        }
+        XCTAssertFalse(mixer.isRunning,
+                       "a refused writer open must not leave a running mixer")
+        XCTAssertTrue(mic.events.isEmpty,
+                      "mic capture must not have been started when the writer open was refused")
+        XCTAssertEqual(ring.closeCallCount, 0,
+                       "nothing was opened, so no stop-side close may run")
+    }
 
     func test_setMicDevice_returns_error_and_restores_previous_device_when_running() throws {
         let mic = MicCaptureMock()

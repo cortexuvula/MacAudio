@@ -31,6 +31,15 @@ SharedRingBuffer* SharedRingBuffer_CreateOrOpen(int forWriting);
 void SharedRingBuffer_Close(SharedRingBuffer* rb);
 void SharedRingBuffer_Destroy(void);
 
+// Exclusive writer ownership. Writer-open acquires ownership BEFORE resetting
+// any shared state, so a second live writer (another app instance) is refused
+// instead of silencing/corrupting the first writer's stream; close releases
+// it, and teardown (unlink) is an owner-only operation.
+int SharedRingBuffer_TryAcquireWriterOwnership(SharedRingBuffer* rb);
+void SharedRingBuffer_ReleaseWriterOwnership(SharedRingBuffer* rb);
+int SharedRingBuffer_HasLiveWriterOwner(void);
+int SharedRingBuffer_DestroyIfUnowned(void);
+
 // Writer accessors (used by the Swift app)
 void SharedRingBuffer_SetActive(SharedRingBuffer* rb, uint32_t active);
 void SharedRingBuffer_SetSampleRate(SharedRingBuffer* rb, uint32_t rate);
